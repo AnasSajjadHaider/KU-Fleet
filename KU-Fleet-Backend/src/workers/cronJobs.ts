@@ -1,140 +1,132 @@
 import * as cron from "node-cron";
 import { tripQueue, analyticsQueue, cleanupQueue } from "./queue";
 
-// Daily cleanup job - runs at 2 AM every day
-cron.schedule("0 2 * * *", async () => {
-  console.log("🔄 Starting daily cleanup job...");
-  
+// --- Internal Health + Rate Limit ---
+let redisHealthy = true;
+let lastRedisErrorTime = 0;
+let HEALTH_CHECK_COOLDOWN = 1000 * 60 * 15; // 15 minutes cooldown after redis error
+
+async function safeJob(fn: () => Promise<void>, label: string) {
+  if (!redisHealthy) {
+    const now = Date.now();
+    if (now - lastRedisErrorTime < HEALTH_CHECK_COOLDOWN) {
+      console.warn(`⏳ Skipping ${label} — Redis in cooldown mode`);
+      return;
+    }
+    redisHealthy = true; // Try again after cooldown
+  }
+
   try {
-    await cleanupQueue.add("cleanupOldTripLogs", {}, {
-      delay: 0,
-      attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 2000,
-      },
-    });
+    await fn();
+  } catch (err: any) {
+    if (err?.code === "ECONNRESET" || err?.message?.includes("Redis")) {
+      redisHealthy = false;
+      lastRedisErrorTime = Date.now();
+      console.error(`❌ Redis connection issue during ${label}:`, err.message);
+    } else {
+      console.error(`❌ Error running ${label}:`, err);
+    }
+  }
+}
 
-    await cleanupQueue.add("cleanupOldAlerts", {}, {
-      delay: 1000,
-      attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 2000,
-      },
-    });
+// --------------------- CRON JOBS ----------------------
 
-    await cleanupQueue.add("cleanupOldFeedback", {}, {
-      delay: 2000,
-      attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 2000,
+// Daily cleanup job - 2 AM
+cron.schedule("0 2 * * *", async () =>
+  safeJob(async () => {
+    console.log("🔄 Starting daily cleanup job...");
+
+    await cleanupQueue.addBulk([
+      {
+        name: "cleanupOldTripLogs",
+        data: {},
+        opts: { attempts: 3, backoff: { type: "exponential", delay: 2000 } },
       },
-    });
+      {
+        name: "cleanupOldAlerts",
+        data: {},
+        opts: { attempts: 3, delay: 1000, backoff: { type: "exponential", delay: 2000 } },
+      },
+      {
+        name: "cleanupOldFeedback",
+        data: {},
+        opts: { attempts: 3, delay: 2000, backoff: { type: "exponential", delay: 2000 } },
+      },
+    ]);
 
     console.log("✅ Daily cleanup jobs scheduled");
-  } catch (error) {
-    console.error("❌ Error scheduling daily cleanup:", error);
-  }
-});
+  }, "daily-cleanup")
+);
 
-// Daily analytics generation - runs at 1 AM every day
-cron.schedule("0 1 * * *", async () => {
-  console.log("📊 Starting daily analytics generation...");
-  
-  try {
+// Daily analytics job - 1 AM
+cron.schedule("0 1 * * *", async () =>
+  safeJob(async () => {
+    console.log("📊 Starting daily analytics generation...");
+
     await analyticsQueue.add("generateDailyAnalytics", {}, {
-      delay: 0,
       attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 2000,
-      },
+      backoff: { type: "exponential", delay: 2000 },
     });
 
     console.log("✅ Daily analytics job scheduled");
-  } catch (error) {
-    console.error("❌ Error scheduling daily analytics:", error);
-  }
-});
+  }, "daily-analytics")
+);
 
-// Cache cleanup - runs every 6 hours
-cron.schedule("0 */6 * * *", async () => {
-  console.log("🧹 Starting cache cleanup...");
-  
-  try {
+// Cache cleanup - Every 6 hours
+cron.schedule("0 */6 * * *", async () =>
+  safeJob(async () => {
+    console.log("🧹 Starting cache cleanup...");
+
     await cleanupQueue.add("clearExpiredCache", {}, {
-      delay: 0,
       attempts: 2,
-      backoff: {
-        type: "exponential",
-        delay: 1000,
-      },
+      backoff: { type: "exponential", delay: 1000 },
     });
 
     console.log("✅ Cache cleanup job scheduled");
-  } catch (error) {
-    console.error("❌ Error scheduling cache cleanup:", error);
-  }
-});
+  }, "cache-cleanup")
+);
 
-// Data archiving - runs weekly on Sunday at 3 AM
-cron.schedule("0 3 * * 0", async () => {
-  console.log("📦 Starting weekly data archiving...");
-  
-  try {
+// Weekly data archiving - Sunday 3 AM
+cron.schedule("0 3 * * 0", async () =>
+  safeJob(async () => {
+    console.log("📦 Starting weekly data archiving...");
+
     await cleanupQueue.add("archiveOldData", {}, {
-      delay: 0,
       attempts: 3,
-      backoff: {
-        type: "exponential",
-        delay: 5000,
-      },
+      backoff: { type: "exponential", delay: 5000 },
     });
 
     console.log("✅ Data archiving job scheduled");
-  } catch (error) {
-    console.error("❌ Error scheduling data archiving:", error);
-  }
-});
+  }, "data-archiving")
+);
 
-// Health check - runs every 5 minutes
-cron.schedule("*/5 * * * *", async () => {
-  console.log("🏥 Running health check...");
-  
-  try {
-    // Check queue health
-    const tripQueueHealth = await tripQueue.getJobCounts();
-    const analyticsQueueHealth = await analyticsQueue.getJobCounts();
-    const cleanupQueueHealth = await cleanupQueue.getJobCounts();
-    
-    console.log("Queue Health:", {
-      trip: tripQueueHealth,
-      analytics: analyticsQueueHealth,
-      cleanup: cleanupQueueHealth
-    });
+// Health check — Every 15 minutes (reduced from 5 to minimize Redis calls)
+// getJobCounts() makes multiple Redis calls, so reducing frequency saves operations
+cron.schedule("*/15 * * * *", async () =>
+  safeJob(async () => {
+    // Only log if there are issues to reduce console noise
+    const [trip, analytics, cleanup] = await Promise.all([
+      tripQueue.getJobCounts(),
+      analyticsQueue.getJobCounts(),
+      cleanupQueue.getJobCounts(),
+    ]);
 
-    // Alert if any queue has too many failed jobs
-    if ((tripQueueHealth.failed ?? 0)> 10) {
-      console.warn("⚠️ Trip queue has many failed jobs:", tripQueueHealth.failed);
-    }
-    
-    if ((analyticsQueueHealth.failed ?? 0)> 5) {
-      console.warn("⚠️ Analytics queue has many failed jobs:", analyticsQueueHealth.failed);
-    }
-    
-    if ((cleanupQueueHealth.failed ?? 0)> 5) {
-      console.warn("⚠️ Cleanup queue has many failed jobs:", cleanupQueueHealth.failed);
-    }
-  } catch (error) {
-    console.error("❌ Error in health check:", error);
-  }
-});
+    const failed = {
+      trip: trip.failed ?? 0,
+      analytics: analytics.failed ?? 0,
+      cleanup: cleanup.failed ?? 0,
+    };
 
-console.log("🕐 Cron jobs initialized:");
+    // Only log if there are actual issues (reduces log writes)
+    if (failed.trip > 10 || failed.analytics > 5 || failed.cleanup > 5) {
+      console.warn("⚠️ Queue Health Issues:", { trip, analytics, cleanup });
+    }
+  }, "health-check")
+);
+
+console.log("🕐 Cron jobs initialized safely:");
 console.log("  - Daily cleanup: 2:00 AM");
 console.log("  - Daily analytics: 1:00 AM");
 console.log("  - Cache cleanup: Every 6 hours");
 console.log("  - Data archiving: Sunday 3:00 AM");
-console.log("  - Health check: Every 5 minutes");
+console.log("  - Health check: Every 5 minutes (optimized + safe mode)");

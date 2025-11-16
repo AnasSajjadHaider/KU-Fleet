@@ -21,6 +21,11 @@ const rfidLogSchema = new Schema<IRFIDLog>(
   { timestamps: true }
 );
 
+// PERFORMANCE: Indexes for RFID log queries
 rfidLogSchema.index({ bus: 1, timestamp: -1 });
+rfidLogSchema.index({ student: 1, timestamp: -1 });
+rfidLogSchema.index({ rfidTag: 1 }); // Already indexed, but explicit
+rfidLogSchema.index({ trip: 1 }, { sparse: true });
+rfidLogSchema.index({ eventType: 1 });
 
 export default mongoose.model<IRFIDLog>("RFIDLog", rfidLogSchema);

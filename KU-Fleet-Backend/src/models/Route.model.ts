@@ -11,4 +11,8 @@ const routeSchema = new Schema<IRoute>(
   { timestamps: true }
 );
 
+// PERFORMANCE: Add indexes for route queries
+// Note: routeName already has index from unique: true, don't duplicate
+routeSchema.index({ active: 1 });
+
 export default mongoose.model<IRoute>("Route", routeSchema);

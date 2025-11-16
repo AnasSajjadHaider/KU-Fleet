@@ -33,4 +33,18 @@ const busSchema = new Schema<IBus>(
   { timestamps: true }
 );
 
+// PERFORMANCE: Add indexes for frequently queried fields
+// Note: trackerIMEI already has index from unique: true, don't duplicate
+// Index on status for filtering active/inactive buses
+busSchema.index({ status: 1 });
+
+// Index on route for route-based queries
+busSchema.index({ route: 1 });
+
+// Index on driver for driver assignment queries
+busSchema.index({ driver: 1 });
+
+// Compound index for status + route queries (common in analytics)
+busSchema.index({ status: 1, route: 1 });
+
 export default mongoose.model<IBus>("Bus", busSchema);

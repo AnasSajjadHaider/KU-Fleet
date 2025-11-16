@@ -1,10 +1,16 @@
+// src/controllers/busController.ts
+// Bus CRUD operations with proper error handling and validation
+
 import { Request, Response } from "express";
 import { Types } from "mongoose";
 import Bus from "../models/Bus.model";
 import Route from "../models/Route.model";
 import User from "../models/User.model";
-import { cacheHelpers } from "../config/redis";
-import { tripQueue } from "../workers/queue";
+import { cacheHelpers, redisClient } from "../config/redis";
+import { bufferCoordinate } from "../services/gpsBuffer";
+import { getSocketIO, ROOMS, EVENTS } from "../utils/socketHelper";
+import { wrapAsync, AppError } from "../middleware/errorHandler";
+import { isValidLatitude, isValidLongitude, validateRequired } from "../utils/validation";
 
 // GET /api/buses — List all buses
 /** ✅ Get all buses */
@@ -109,6 +115,23 @@ export const createBus = async (req: Request, res: Response) => {
       photo,
     });
 
+    // Emit socket event for bus creation
+    const io = getSocketIO();
+    if (io) {
+      io.to(ROOMS.ADMINS).emit(EVENTS.BUS_CREATED, {
+        bus: {
+          _id: bus._id,
+          busNumber: bus.busNumber,
+          busNumberPlate: bus.busNumberPlate,
+          capacity: bus.capacity,
+          route: routeId,
+          driver: driverId || null,
+          trackerIMEI: bus.trackerIMEI,
+          status: bus.status
+        }
+      });
+    }
+
     res.status(201).json({
       success: true,
       message: "Bus registered successfully",
@@ -135,6 +158,29 @@ export const updateBus = async (req: Request, res: Response) => {
 
     if (!bus) return res.status(404).json({ message: "Bus not found" });
 
+    // Emit socket event for bus update
+    const io = getSocketIO();
+    if (io) {
+      io.to(ROOMS.ADMINS).emit(EVENTS.BUS_UPDATED, {
+        busId: String(bus._id),
+        updates,
+        bus: {
+          _id: bus._id,
+          busNumber: bus.busNumber,
+          status: bus.status,
+          route: bus.route,
+          driver: bus.driver
+        }
+      });
+      // Emit to bus-specific room if status changed
+      if (updates.status) {
+        io.to(ROOMS.bus(String(bus._id))).emit(EVENTS.BUS_STATUS_CHANGED, {
+          busId: String(bus._id),
+          status: bus.status
+        });
+      }
+    }
+
     res.status(200).json({ success: true, message: "Bus updated", bus });
   } catch (error) {
     res.status(500).json({ message: "Failed to update bus", error });
@@ -147,10 +193,27 @@ export const deleteBus = async (req: Request, res: Response) => {
   try {
     const deactivatedBus = await Bus.findByIdAndUpdate(
       req.params.id,
-      { busStatus: "inactive" },
+      { status: "inactive" }, // Fixed: use 'status' not 'busStatus'
       { new: true }
     );
     if (!deactivatedBus) return res.status(404).json({ message: "Bus not found" });
+
+    // Emit socket events for bus deactivation
+    const io = getSocketIO();
+    if (io) {
+      io.to(ROOMS.ADMINS).emit(EVENTS.BUS_DELETED, {
+        busId: String(deactivatedBus._id),
+        bus: {
+          _id: deactivatedBus._id,
+          busNumber: deactivatedBus.busNumber,
+          status: deactivatedBus.status
+        }
+      });
+      io.to(ROOMS.bus(String(deactivatedBus._id))).emit(EVENTS.BUS_STATUS_CHANGED, {
+        busId: String(deactivatedBus._id),
+        status: "inactive"
+      });
+    }
 
     res.status(200).json({ message: "Bus deactivated", bus: deactivatedBus });
   } catch (error) {
@@ -174,6 +237,24 @@ export const assignDriver = async (req: Request, res: Response) => {
     // Assign driver's ObjectId to the bus per schema
     bus.driver = driver._id as unknown as Types.ObjectId;
     await bus.save();
+
+    // Emit socket event for driver assignment
+    const io = getSocketIO();
+    if (io) {
+      io.to(ROOMS.ADMINS).emit(EVENTS.DRIVER_ASSIGNED, {
+        busId: String(bus._id),
+        driverId: String(driver._id),
+        driver: {
+          _id: driver._id,
+          name: driver.name,
+          email: driver.email
+        },
+        bus: {
+          _id: bus._id,
+          busNumber: bus.busNumber
+        }
+      });
+    }
 
     res.status(200).json({ message: "Driver assigned successfully", bus });
   } catch (error) {
@@ -270,16 +351,36 @@ export const updateBusLocation = async (req: Request, res: Response) => {
     };
     await cacheHelpers.setBusLocation(id.toString(), locationData, 300);
 
-    // Queue trip segment update if bus is on a trip
-    await tripQueue.add("saveTripSegment", {
-      busId: id,
-      coords: coordinates,
-      speed,
+    // OPTIMIZATION: Use GPS buffer instead of queue job for manual location updates
+    // This reduces BullMQ Redis operations significantly
+    // Buffer will flush coordinates in batches (every 30s) instead of creating jobs per update
+    bufferCoordinate(id, {
+      lat: coordinates.lat,
+      lng: coordinates.lng,
+      speed: speed || 0,
       timestamp: timestamp || new Date()
-    }, {
-      delay: 0,
-      attempts: 3
     });
+
+    // Emit socket event for location update
+    const io = getSocketIO();
+    if (io) {
+      io.to(ROOMS.ADMINS).emit(EVENTS.BUS_LOCATION_UPDATE, {
+        busId: id,
+        location: locationData
+      });
+      io.to(ROOMS.STUDENTS).emit(EVENTS.BUS_LOCATION_UPDATE, {
+        busId: id,
+        location: {
+          coordinates,
+          speed,
+          timestamp: timestamp || new Date()
+        }
+      });
+      io.to(ROOMS.bus(id)).emit(EVENTS.BUS_LOCATION_UPDATE, {
+        busId: id,
+        location: locationData
+      });
+    }
 
     res.status(200).json({ 
       success: true, 
@@ -306,10 +407,41 @@ export const getAllBusLocations = async (req: Request, res: Response) => {
 
     const locations = [];
     
+    // OPTIMIZATION: Batch Redis reads using MGET instead of individual GET calls
+    // This reduces Redis operations from N to 1 for N buses
+    const busIds = buses.map(b => b._id?.toString()).filter(Boolean) as string[];
+    const cacheKeys = busIds.map(id => `bus:location:${id}`);
+    
+    let cachedLocations: Map<string, any> = new Map();
+    if (cacheKeys.length > 0) {
+      try {
+        // Batch read all locations in one Redis call (MGET)
+        const values = await redisClient.mget(...cacheKeys);
+        values.forEach((value, index) => {
+          if (value && busIds[index]) {
+            try {
+              cachedLocations.set(busIds[index], JSON.parse(value));
+            } catch (e) {
+              // Invalid JSON, skip
+            }
+          }
+        });
+      } catch (err) {
+        console.warn("⚠️ Batch cache read failed, falling back to individual reads:", err);
+      }
+    }
+    
     for (const bus of buses) {
-      // Try cache first, fallback to database
-      let location = await cacheHelpers.getBusLocation(bus._id?.toString() || "");
+      const busId = bus._id?.toString() || "";
+      // Use batch-read cache first
+      let location = cachedLocations.get(busId);
       
+      // Fallback to individual cache read if not in batch result
+      if (!location) {
+        location = await cacheHelpers.getBusLocation(busId);
+      }
+      
+      // Final fallback to database
       if (!location && bus.lastLocation) {
         location = {
           coordinates: bus.lastLocation,
@@ -321,7 +453,7 @@ export const getAllBusLocations = async (req: Request, res: Response) => {
       locations.push({
         busId: bus._id,
         busNumber: bus.busNumber,
-        busNumberPlate: bus.busNumberPlate, // Use busNumberPlate instead of plateNumber
+        busNumberPlate: bus.busNumberPlate,
         route: bus.route,
         driver: bus.driver,
         location,

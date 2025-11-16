@@ -33,4 +33,23 @@ const userSchema = new Schema<IUser>(
   { timestamps: true }
 );
 
+// PERFORMANCE: Add indexes for frequently queried fields
+// Index on email (already unique, but explicit for performance)
+userSchema.index({ email: 1 });
+
+// Index on role for role-based queries
+userSchema.index({ role: 1 });
+
+// Index on status for filtering active/inactive users
+userSchema.index({ status: 1 });
+
+// Index on assignedBus for driver-bus lookups
+userSchema.index({ assignedBus: 1 }, { sparse: true });
+
+// Index on rfidCardUID for RFID lookups (already unique, but explicit)
+userSchema.index({ rfidCardUID: 1 }, { sparse: true });
+
+// Compound index for role + status queries
+userSchema.index({ role: 1, status: 1 });
+
 export default mongoose.model<IUser>("User", userSchema);
