@@ -1,10 +1,12 @@
 import * as cron from "node-cron";
 import { tripQueue, analyticsQueue, cleanupQueue } from "./queue";
+import { AnalyticsJobPayload } from "./workers";
+ // adjust path if needed
 
 // --- Internal Health + Rate Limit ---
 let redisHealthy = true;
 let lastRedisErrorTime = 0;
-let HEALTH_CHECK_COOLDOWN = 1000 * 60 * 15; // 15 minutes cooldown after redis error
+const HEALTH_CHECK_COOLDOWN = 1000 * 60 * 15; // 15 minutes cooldown
 
 async function safeJob(fn: () => Promise<void>, label: string) {
   if (!redisHealthy) {
@@ -63,7 +65,9 @@ cron.schedule("0 1 * * *", async () =>
   safeJob(async () => {
     console.log("📊 Starting daily analytics generation...");
 
-    await analyticsQueue.add("generateDailyAnalytics", {}, {
+    const payload: AnalyticsJobPayload = { type: "daily" };
+
+    await analyticsQueue.add("generateDailyAnalytics", payload, {
       attempts: 3,
       backoff: { type: "exponential", delay: 2000 },
     });
@@ -100,11 +104,9 @@ cron.schedule("0 3 * * 0", async () =>
   }, "data-archiving")
 );
 
-// Health check — Every 15 minutes (reduced from 5 to minimize Redis calls)
-// getJobCounts() makes multiple Redis calls, so reducing frequency saves operations
+// Health check — Every 15 minutes
 cron.schedule("*/15 * * * *", async () =>
   safeJob(async () => {
-    // Only log if there are issues to reduce console noise
     const [trip, analytics, cleanup] = await Promise.all([
       tripQueue.getJobCounts(),
       analyticsQueue.getJobCounts(),
@@ -117,7 +119,6 @@ cron.schedule("*/15 * * * *", async () =>
       cleanup: cleanup.failed ?? 0,
     };
 
-    // Only log if there are actual issues (reduces log writes)
     if (failed.trip > 10 || failed.analytics > 5 || failed.cleanup > 5) {
       console.warn("⚠️ Queue Health Issues:", { trip, analytics, cleanup });
     }
@@ -129,4 +130,4 @@ console.log("  - Daily cleanup: 2:00 AM");
 console.log("  - Daily analytics: 1:00 AM");
 console.log("  - Cache cleanup: Every 6 hours");
 console.log("  - Data archiving: Sunday 3:00 AM");
-console.log("  - Health check: Every 5 minutes (optimized + safe mode)");
+console.log("  - Health check: Every 15 minutes (optimized + safe mode)");

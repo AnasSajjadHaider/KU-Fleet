@@ -1,154 +1,97 @@
-// src/services/gpsBuffer.ts
-// In-memory buffer for GPS coordinates to reduce Redis/BullMQ operations by 90%+
-// Flushes coordinates in batches instead of creating a job per coordinate
-
-import TripLog from "../models/TripLog.model";
-import { haversineMeters } from "../utils/geo";
-
-interface BufferedCoordinate {
-  busId: string;
-  coords: {
-    lat: number;
-    lng: number;
-    speed: number;
-    timestamp: Date;
-  };
-}
-
-// In-memory buffer: busId -> coordinates array
-const coordinateBuffer: Map<string, BufferedCoordinate[]> = new Map();
-const lastFlushTime: Map<string, number> = new Map();
-
-// Configuration
-const FLUSH_INTERVAL_MS = 30000; // Flush every 30 seconds (reduces operations by 97% if GPS updates every 1s)
-const MIN_DISTANCE_METERS = 10; // Only buffer if bus moved at least 10 meters
-const MAX_BUFFER_SIZE = 50; // Max coordinates per bus before forced flush
-
-// Last known coordinates per bus (for delta checking)
-const lastCoords: Map<string, { lat: number; lng: number }> = new Map();
+// gpsBuffer.ts
+import EventEmitter from "events";
+import { cacheHelpers } from "../config/redis";   // <-- using your helpers
+import { redisClient } from "../config/redis";
 
 /**
- * Add coordinate to buffer instead of immediately creating a queue job
- * This reduces Redis operations from 1 per second to 1 per 30 seconds per bus
+ * GPSBuffer
+ * Stores & batches GPS packets for each bus before pushing it to Redis.
  */
-export function bufferCoordinate(busId: string, coords: BufferedCoordinate["coords"]): void {
-  const now = Date.now();
-  
-  // Delta check: skip if coordinates haven't changed significantly
-  const last = lastCoords.get(busId);
-  if (last) {
-    const distance = haversineMeters(last.lat, last.lng, coords.lat, coords.lng);
-    if (distance < MIN_DISTANCE_METERS) {
-      // Bus hasn't moved enough, skip buffering
-      return;
+
+class GPSBuffer extends EventEmitter {
+  private buffer: Map<string, any[]>;
+  private flushInterval: NodeJS.Timeout;
+
+  constructor() {
+    super();
+    this.buffer = new Map();
+
+    // Flush every 10 seconds (adjust as needed)
+    this.flushInterval = setInterval(() => this.flushAll(), 10_000);
+
+    console.log("📍 GPS Buffer initialized");
+  }
+
+  /**
+   * Add a new GPS packet for a bus
+   */
+  add(busId: string, gpsData: any) {
+    if (!this.buffer.has(busId)) {
+      this.buffer.set(busId, []);
+    }
+
+    this.buffer.get(busId)!.push({
+      ...gpsData,
+      timestamp: Date.now(),
+    });
+
+    // Update the latest bus location cache immediately
+    cacheHelpers.setBusLocation(busId, gpsData).catch(console.error);
+
+    // Emit an event for UI updates or analytics
+    this.emit("location_update", busId, gpsData);
+  }
+
+  /**
+   * Flush local buffer into Redis as a batch list
+   */
+  async flush(busId: string) {
+    const points = this.buffer.get(busId);
+    if (!points || points.length === 0) return;
+
+    try {
+      const redisKey = `bus:gps_history:${busId}`;
+
+      // Push all points to Redis list
+      await redisClient.rpush(redisKey, ...points.map(p => JSON.stringify(p)));
+
+      // Keep list from growing too large
+      await redisClient.ltrim(redisKey, -500, -1); // keep last 500 points
+
+      // Clear in-memory buffer
+      this.buffer.set(busId, []);
+
+      console.log(`📤 Flushed ${points.length} GPS points for bus ${busId}`);
+    } catch (err) {
+      console.error("❌ GPS Buffer flush error:", err);
     }
   }
-  
-  // Update last known coordinates
-  lastCoords.set(busId, { lat: coords.lat, lng: coords.lng });
-  
-  // Get or create buffer for this bus
-  if (!coordinateBuffer.has(busId)) {
-    coordinateBuffer.set(busId, []);
-    lastFlushTime.set(busId, now);
+
+  /**
+   * Flush all buses
+   */
+  async flushAll() {
+    for (const busId of this.buffer.keys()) {
+      await this.flush(busId);
+    }
   }
-  
-  const buffer = coordinateBuffer.get(busId)!;
-  buffer.push({ busId, coords });
-  
-  // Force flush if buffer is too large
-  if (buffer.length >= MAX_BUFFER_SIZE) {
-    flushBusCoordinates(busId);
+
+  /**
+   * Clean up before shutdown
+   */
+  async shutdown() {
+    clearInterval(this.flushInterval);
+    await this.flushAll();
+    console.log("🛑 GPS Buffer shutdown completed");
   }
 }
 
-/**
- * Flush buffered coordinates for a specific bus to database
- * This replaces many individual queue jobs with a single batch update
- */
-async function flushBusCoordinates(busId: string): Promise<void> {
-  const buffer = coordinateBuffer.get(busId);
-  if (!buffer || buffer.length === 0) return;
-  
-  // Clear buffer immediately to prevent concurrent flushes
-  coordinateBuffer.set(busId, []);
-  lastFlushTime.set(busId, Date.now());
-  
-  try {
-    // Batch update: append all coordinates at once instead of one-by-one
-    // This is 10-50x more efficient than individual updates
-    const coordinates = buffer.map(b => b.coords);
-    const latestCoord = coordinates[coordinates.length - 1];
-    
-    // SECURITY: Ensure we have coordinates before updating
-    if (!latestCoord || coordinates.length === 0) {
-      console.warn(`⚠️ No coordinates to flush for bus ${busId}`);
-      return;
-    }
-    
-    await TripLog.updateOne(
-      { bus: busId, endTime: null },
-      {
-        $push: { 
-          coordinates: { $each: coordinates } // Batch push all coordinates
-        },
-        $set: {
-          lastUpdate: latestCoord.timestamp,
-          currentSpeed: latestCoord.speed ?? 0,
-        },
-      }
-    );
-    
-    // Only log if significant batch size to reduce log noise
-    if (buffer.length > 5) {
-      console.log(`📦 Flushed ${buffer.length} coordinates for bus ${busId} (batch update)`);
-    }
-  } catch (error) {
-    console.error(`❌ Error flushing coordinates for bus ${busId}:`, error);
-    // Re-buffer on error to prevent data loss
-    const existing = coordinateBuffer.get(busId) || [];
-    coordinateBuffer.set(busId, [...existing, ...buffer]);
-  }
-}
+export const gpsBuffer = new GPSBuffer();
+export const bufferCoordinate = (busId: string, coords: any) => {
+  gpsBuffer.add(busId, coords);
+};
 
-/**
- * Flush all buses that have pending coordinates
- * Called periodically to ensure data is persisted
- */
-export async function flushAllBuffers(): Promise<void> {
-  const now = Date.now();
-  const busesToFlush: string[] = [];
-  
-  // Find buses that need flushing (time-based or have data)
-  for (const [busId, buffer] of coordinateBuffer.entries()) {
-    if (buffer.length === 0) continue;
-    
-    const lastFlush = lastFlushTime.get(busId) || 0;
-    if (now - lastFlush >= FLUSH_INTERVAL_MS || buffer.length >= MAX_BUFFER_SIZE) {
-      busesToFlush.push(busId);
-    }
-  }
-  
-  // Flush all buses in parallel (but limit concurrency)
-  const flushPromises = busesToFlush.map(busId => flushBusCoordinates(busId));
-  await Promise.all(flushPromises);
-}
-
-/**
- * Force flush coordinates for a bus (e.g., when trip ends)
- */
-export async function forceFlushBus(busId: string): Promise<void> {
-  await flushBusCoordinates(busId);
-  lastCoords.delete(busId); // Clean up
-}
-
-// Start periodic flush timer (every 30 seconds)
-// This ensures data is persisted even if no new coordinates arrive
-setInterval(() => {
-  flushAllBuffers().catch(err => {
-    console.error("❌ Error in periodic buffer flush:", err);
-  });
-}, FLUSH_INTERVAL_MS);
-
-console.log(`✅ GPS coordinate buffer initialized (flush interval: ${FLUSH_INTERVAL_MS}ms)`);
-
+export const forceFlushBus = async (busId: string) => {
+  await gpsBuffer.flush(busId);
+};
+ 
