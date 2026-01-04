@@ -42,3 +42,69 @@ export const loginUser = async (req: Request, res: Response) => {
     res.status(500).json({ message: "Login failed", error });
   }
 };
+
+
+
+/** ----------------- STUDENT SPECIFIC ----------------- */
+// Admin registers student
+export const registerStudent = async (req: Request, res: Response) => {
+  try {
+    const { name, rfidCardUID } = req.body;
+
+    if (!name || !rfidCardUID) {
+      return res.status(400).json({ message: "Name and RFID UID are required" });
+    }
+
+    // Normalize UID: uppercase, remove spaces
+    const normalizedUID = rfidCardUID.replace(/\s+/g, "").toUpperCase();
+
+    const exists = await User.findOne({ rfidCardUID: normalizedUID });
+    if (exists) {
+      return res.status(400).json({ message: "RFID UID already registered" });
+    }
+
+    const student = await User.create({
+      name,
+      rfidCardUID: normalizedUID,
+      role: "student",
+      status: "active",
+    });
+
+    res.status(201).json({ message: "Student registered", student });
+  } catch (error) {
+    res.status(500).json({ message: "Student registration failed", error });
+  }
+};
+
+
+// Student login via RFID
+export const loginStudent = async (req: Request, res: Response) => {
+  try {
+    const { rfidCardUID } = req.body;
+    if (!rfidCardUID) return res.status(400).json({ message: "RFID UID required" });
+
+    // Normalize UID: uppercase, remove spaces
+    const normalizedUID = rfidCardUID.replace(/\s+/g, "").toUpperCase();
+
+    const student = await User.findOne({
+      rfidCardUID: normalizedUID,
+      role: "student",
+      status: "active",
+    });
+
+    if (!student) return res.status(404).json({ message: "Invalid RFID card" });
+
+    const token = generateToken(student.id);
+
+    res.status(200).json({
+      token,
+      student: {
+        id: student._id,
+        name: student.name,
+        rfidCardUID: student.rfidCardUID,
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Student login failed", error });
+  }
+};

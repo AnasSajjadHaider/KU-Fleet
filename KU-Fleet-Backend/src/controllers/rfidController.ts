@@ -9,19 +9,23 @@ export const handleRfidScan = async (req: Request, res: Response) => {
   try {
     const { rfidTag, busId } = req.body;
 
+    // 1️⃣ Validate input
     if (!rfidTag || !busId) {
       return res.status(400).json({ message: "rfidTag and busId required" });
     }
 
-    // 1️⃣ Validate bus
+    // 2️⃣ Normalize RFID UID: remove spaces, convert to uppercase
+    const normalizedUID = rfidTag.replace(/\s+/g, "").toUpperCase();
+
+    // 3️⃣ Validate bus
     const bus = await Bus.findById(busId);
     if (!bus) {
       return res.status(404).json({ message: "Bus not found" });
     }
 
-    // 2️⃣ Find student by RFID
+    // 4️⃣ Find active student by RFID
     const student = await User.findOne({
-      rfidCardUID: rfidTag,
+      rfidCardUID: normalizedUID,
       role: "student",
       status: "active",
     });
@@ -30,28 +34,28 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Invalid RFID card" });
     }
 
-    // 3️⃣ Determine BOARD / EXIT
+    // 5️⃣ Determine BOARD / EXIT event
     const eventType = await determineRfidEvent(
       String(student._id),
       String(bus._id)
     );
 
-    // 4️⃣ Find active trip (optional but recommended)
+    // 6️⃣ Find active trip (optional but recommended)
     const activeTrip = await TripLog.findOne({
       bus: bus._id,
       status: "active",
     });
 
-    // 5️⃣ Save RFID log
+    // 7️⃣ Save RFID log
     const log = await RFIDLog.create({
-      rfidTag,
+      rfidTag: normalizedUID,
       student: student._id,
       bus: bus._id,
       eventType,
       trip: activeTrip?._id,
     });
 
-    // 6️⃣ Emit socket event (UI only)
+    // 8️⃣ Emit socket event for frontend/UI updates
     const io = req.app.get("io");
     io?.emit("rfid:event", {
       studentId: student._id,
@@ -61,10 +65,12 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       time: log.timestamp,
     });
 
+    // 9️⃣ Respond success
     return res.status(200).json({
       message: "RFID processed",
       eventType,
       student: student.name,
+      rfidTag: normalizedUID, // return normalized UID for clarity
     });
   } catch (error) {
     console.error("RFID ERROR:", error);
