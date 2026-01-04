@@ -48,3 +48,12 @@ connectDB().then(()=>{
 app.get("/",(_,res)=>{
     res.json({message:"KU Fleet Backend is up"})
 })
+
+app.get("/students/test", (_req, res) => {
+    res.json({
+      success: true,
+      message: "Student auth routes are LIVE",
+      timestamp: new Date().toISOString(),
+    });
+  });
+  

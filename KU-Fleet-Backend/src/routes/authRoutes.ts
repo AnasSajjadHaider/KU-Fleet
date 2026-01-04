@@ -1,6 +1,5 @@
 import express from "express";
 import { loginStudent, loginUser, registerStudent, registerUser } from "../controllers/authController";
-import { adminOnly, protect } from "../middleware/AuthMiddleware";
 
 
 
