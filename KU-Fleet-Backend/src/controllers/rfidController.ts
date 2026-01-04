@@ -5,13 +5,16 @@ import RFIDLog from "../models/RFIDLog.model";
 import TripLog from "../models/TripLog.model";
 import { determineRfidEvent } from "../utils/rfid.utils";
 
+/**
+ * Handle a student RFID scan (boarding/exiting a bus)
+ */
 export const handleRfidScan = async (req: Request, res: Response) => {
   try {
     const { rfidTag, busId } = req.body;
 
     // 1️⃣ Validate input
     if (!rfidTag || !busId) {
-      return res.status(400).json({ message: "rfidTag and busId required" });
+      return res.status(400).json({ message: "rfidTag and busId are required" });
     }
 
     // 2️⃣ Normalize RFID UID: remove spaces, convert to uppercase
@@ -23,7 +26,7 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       return res.status(404).json({ message: "Bus not found" });
     }
 
-    // 4️⃣ Find active student by RFID
+    // 4️⃣ Find active student by RFID (no email/password required)
     const student = await User.findOne({
       rfidCardUID: normalizedUID,
       role: "student",
@@ -40,7 +43,7 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       String(bus._id)
     );
 
-    // 6️⃣ Find active trip (optional but recommended)
+    // 6️⃣ Find active trip for the bus (optional but recommended)
     const activeTrip = await TripLog.findOne({
       bus: bus._id,
       status: "active",
@@ -55,43 +58,47 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       trip: activeTrip?._id,
     });
 
-    // 8️⃣ Emit socket event for frontend/UI updates
+    // 8️⃣ Emit socket event for real-time updates
     const io = req.app.get("io");
     io?.emit("rfid:event", {
       studentId: student._id,
       studentName: student.name,
       busId: bus._id,
       eventType,
-      time: log.timestamp,
+      timestamp: log.createdAt || new Date(),
     });
 
-    // 9️⃣ Respond success
+    // 9️⃣ Return success
     return res.status(200).json({
-      message: "RFID processed",
+      message: "RFID processed successfully",
       eventType,
-      student: student.name,
-      rfidTag: normalizedUID, // return normalized UID for clarity
+      student: {
+        id: student._id,
+        name: student.name,
+        rfidCardUID: student.rfidCardUID,
+      },
     });
-  } catch (error) {
+  } catch (error: any) {
     console.error("RFID ERROR:", error);
-    return res.status(500).json({ message: "RFID scan failed" });
+    return res.status(500).json({ message: "RFID scan failed", error: error.message });
   }
 };
 
-
 /**
- * Get all RFID logs
+ * Get all RFID logs (admin use)
  */
 export const getAllRfidLogs = async (_req: Request, res: Response) => {
   try {
     const logs = await RFIDLog.find()
       .populate("student", "name rfidCardUID")
       .populate("bus", "busNumber busNumberPlate")
-      .populate("trip", "startTime endTime status");
+      .populate("trip", "startTime endTime status")
+      .sort({ createdAt: -1 });
+
     return res.status(200).json({ logs });
-  } catch (error) {
+  } catch (error: any) {
     console.error("RFID GET ALL ERROR:", error);
-    return res.status(500).json({ message: "Failed to fetch RFID logs" });
+    return res.status(500).json({ message: "Failed to fetch RFID logs", error: error.message });
   }
 };
 
@@ -102,7 +109,8 @@ export const getStudentRfidLogs = async (req: Request, res: Response) => {
   try {
     const { studentId, rfidCardUID } = req.query;
 
-    if (!studentId && !rfidCardUID) return res.status(400).json({ message: "studentId or rfidCardUID required" });
+    if (!studentId && !rfidCardUID)
+      return res.status(400).json({ message: "studentId or rfidCardUID required" });
 
     const student = studentId
       ? await User.findById(studentId)
@@ -112,12 +120,13 @@ export const getStudentRfidLogs = async (req: Request, res: Response) => {
 
     const logs = await RFIDLog.find({ student: student._id })
       .populate("bus", "busNumber busNumberPlate")
-      .populate("trip", "startTime endTime status");
+      .populate("trip", "startTime endTime status")
+      .sort({ createdAt: -1 });
 
-    return res.status(200).json({ student: student.name, logs });
-  } catch (error) {
+    return res.status(200).json({ student: { id: student._id, name: student.name }, logs });
+  } catch (error: any) {
     console.error("RFID STUDENT LOGS ERROR:", error);
-    return res.status(500).json({ message: "Failed to fetch student RFID logs" });
+    return res.status(500).json({ message: "Failed to fetch student RFID logs", error: error.message });
   }
 };
 
@@ -135,11 +144,11 @@ export const getBusRfidLogs = async (req: Request, res: Response) => {
     const logs = await RFIDLog.find({ bus: bus._id })
       .populate("student", "name rfidCardUID")
       .populate("trip", "startTime endTime status")
-      .sort({ timestamp: -1 });
+      .sort({ createdAt: -1 });
 
-    return res.status(200).json({ bus: bus.busNumber, logs });
-  } catch (error) {
+    return res.status(200).json({ bus: { id: bus._id, busNumber: bus.busNumber }, logs });
+  } catch (error: any) {
     console.error("RFID BUS LOGS ERROR:", error);
-    return res.status(500).json({ message: "Failed to fetch bus RFID logs" });
+    return res.status(500).json({ message: "Failed to fetch bus RFID logs", error: error.message });
   }
 };
