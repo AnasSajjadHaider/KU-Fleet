@@ -72,6 +72,13 @@ app.get("/", (_, res) => {
     timestamp: new Date().toISOString(),
   });
 });
+app.get("/students/test", (_req, res) => {
+  res.json({
+    success: true,
+    message: "Student auth routes are LIVE",
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // ============================
 // ERROR HANDLING
