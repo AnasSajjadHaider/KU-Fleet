@@ -1,4 +1,3 @@
-// src/tcp/tcpServer.ts
 import net from "net";
 import Gt06 from "gt06";
 import { handleParsedMessage } from "../services/gpsHandler";
@@ -18,26 +17,29 @@ export async function startTcpServer(port: number) {
       console.log("\n================= RAW TRACKER PACKET =================");
       console.log("🕒 Time:", new Date().toISOString());
       console.log("📡 From:", client.remoteAddress, client.remotePort);
-
-      // 🔴 RAW DATA (ABSOLUTE TRUTH)
       console.log("📦 RAW BUFFER (HEX):", data.toString("hex"));
       console.log("📨 RAW STRING (utf8):", data.toString());
-
       console.log("📏 Packet Length:", data.length);
       console.log("======================================================\n");
 
-      // 🧠 Attempt GT06 parse (preserve original logic)
+      let parsedByGt06 = true;
+
+      // 🧠 Attempt GT06 parse (classic protocol)
       try {
         gt06.parse(data);
       } catch (e: any) {
-        console.log("❌ GT06 parse error:", e?.message ?? e);
-        return;
+        parsedByGt06 = false;
+
+        console.error("❌ GT06 parse error (likely extended/vendor protocol):", {
+          error: e?.message ?? e,
+          rawHex: data.toString("hex"),
+          length: data.length,
+          time: new Date().toISOString(),
+        });
       }
 
-      // 🔁 Log protocol expectations
-      console.log("📥 GT06 expects response:", gt06.expectsResponse);
-
-      if (gt06.expectsResponse && gt06.responseMsg) {
+      // 📤 Respond to classic GT06 if required
+      if (parsedByGt06 && gt06.expectsResponse && gt06.responseMsg) {
         console.log(
           "📤 Sending GT06 response (HEX):",
           Buffer.from(gt06.responseMsg).toString("hex")
@@ -45,34 +47,51 @@ export async function startTcpServer(port: number) {
         client.write(gt06.responseMsg);
       }
 
-      // 🧩 Parsed messages from GT06
-      if (gt06.msgBuffer?.length) {
+      // 🧩 Handle classic parsed messages
+      if (parsedByGt06 && gt06.msgBuffer?.length) {
         console.log(`📨 Parsed Messages Count: ${gt06.msgBuffer.length}`);
-      } else {
-        console.log("⚠️ No parsed messages in buffer");
+
+        for (const msg of gt06.msgBuffer as any[]) {
+          console.log("\n------------- PARSED GT06 MESSAGE ----------------");
+          console.dir(msg, { depth: null });
+
+          if (msg?.imei) {
+            console.log("🆔 IMEI:", msg.imei);
+          }
+
+          try {
+            await handleParsedMessage(msg);
+          } catch (err) {
+            console.error("❌ Error handling parsed GT06 message:", err);
+          }
+
+          console.log("--------------------------------------------------\n");
+        }
+
+        gt06.clearMsgBuffer();
+        return;
       }
 
-      for (const msg of gt06.msgBuffer as any[]) {
-        console.log("\n------------- PARSED GT06 MESSAGE ----------------");
-        console.log("📄 Parsed Message (RAW OBJECT):");
-        console.dir(msg, { depth: null });
+      // 🔥 Handle EXTENDED / UNKNOWN packets (e.g. protocol 34)
+      if (!parsedByGt06) {
+        const extendedPayload = {
+          protocol: "GT06_EXTENDED",
+          rawHex: data.toString("hex"),
+          rawBuffer: data,
+          length: data.length,
+          remoteAddress: client.remoteAddress,
+          receivedAt: Date.now(),
+        };
 
-        // 🔍 Try extracting IMEI if present
-        if (msg?.imei) {
-          console.log("🆔 IMEI:", msg.imei);
-        }
+        console.log("🧩 Handling GT06 EXTENDED / VENDOR packet");
+        console.dir(extendedPayload, { depth: null });
 
         try {
-          // Original behavior preserved
-          await handleParsedMessage(msg);
+          await handleParsedMessage(extendedPayload);
         } catch (err) {
-          console.error("❌ Error handling parsed message:", err);
+          console.error("❌ Error handling extended GT06 packet:", err);
         }
-        console.log("--------------------------------------------------\n");
       }
-
-      // clear buffer (preserve original)
-      gt06.clearMsgBuffer();
     });
 
     client.on("end", () => {
