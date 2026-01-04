@@ -21,7 +21,7 @@ async function start() {
 
   // Initialize Socket.IO
   const io = new SocketIOServer(server, {
-    cors: { origin: "*" }, // restrict in production
+    cors: { origin: "*" }, // restrict in production 
   });
 
   // Set Socket.IO in centralized helper

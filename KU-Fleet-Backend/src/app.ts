@@ -18,6 +18,7 @@ import tripRoutes from "./routes/tripRoutes";
 import feedbackRoutes from "./routes/feebackRoutes";
 import alertRoutes from "./routes/alertRoutes";
 import uploadRoutes from "./routes/uploadRoutes";
+import rfidRoutes from "./routes/rfidRoutes";
 
 // Workers/cron jobs
 import "./workers/tripWorker";
@@ -61,6 +62,7 @@ app.use("/api/tripLogs", tripRoutes);
 app.use("/api/feedback", feedbackRoutes);
 app.use("/api/alerts", alertRoutes);
 app.use("/api/upload", uploadRoutes);
+app.use("/api/rfid", rfidRoutes);
 
 // Health check
 app.get("/", (_, res) => {

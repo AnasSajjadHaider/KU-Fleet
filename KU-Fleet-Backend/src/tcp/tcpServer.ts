@@ -7,9 +7,26 @@ import { app } from "../app";
 export async function startTcpServer(port: number) {
   const server = net.createServer((client) => {
     const gt06 = new Gt06();
-    console.log("📡 TCP client connected:", client.remoteAddress, client.remotePort);
+
+    console.log("📡 TCP client connected:", {
+      ip: client.remoteAddress,
+      port: client.remotePort,
+      time: new Date().toISOString(),
+    });
 
     client.on("data", async (data: Buffer) => {
+      console.log("\n================= RAW TRACKER PACKET =================");
+      console.log("🕒 Time:", new Date().toISOString());
+      console.log("📡 From:", client.remoteAddress, client.remotePort);
+
+      // 🔴 RAW DATA (ABSOLUTE TRUTH)
+      console.log("📦 RAW BUFFER (HEX):", data.toString("hex"));
+      console.log("📨 RAW STRING (utf8):", data.toString());
+
+      console.log("📏 Packet Length:", data.length);
+      console.log("======================================================\n");
+
+      // 🧠 Attempt GT06 parse (preserve original logic)
       try {
         gt06.parse(data);
       } catch (e: any) {
@@ -17,19 +34,41 @@ export async function startTcpServer(port: number) {
         return;
       }
 
-      // Preserve original behavior: respond when required
+      // 🔁 Log protocol expectations
+      console.log("📥 GT06 expects response:", gt06.expectsResponse);
+
       if (gt06.expectsResponse && gt06.responseMsg) {
+        console.log(
+          "📤 Sending GT06 response (HEX):",
+          Buffer.from(gt06.responseMsg).toString("hex")
+        );
         client.write(gt06.responseMsg);
       }
 
-      // Process parsed messages (gt06.msgBuffer)
+      // 🧩 Parsed messages from GT06
+      if (gt06.msgBuffer?.length) {
+        console.log(`📨 Parsed Messages Count: ${gt06.msgBuffer.length}`);
+      } else {
+        console.log("⚠️ No parsed messages in buffer");
+      }
+
       for (const msg of gt06.msgBuffer as any[]) {
+        console.log("\n------------- PARSED GT06 MESSAGE ----------------");
+        console.log("📄 Parsed Message (RAW OBJECT):");
+        console.dir(msg, { depth: null });
+
+        // 🔍 Try extracting IMEI if present
+        if (msg?.imei) {
+          console.log("🆔 IMEI:", msg.imei);
+        }
+
         try {
-          // handleParsedMessage does caching, trips, alerts, socket emits
+          // Original behavior preserved
           await handleParsedMessage(msg);
         } catch (err) {
           console.error("❌ Error handling parsed message:", err);
         }
+        console.log("--------------------------------------------------\n");
       }
 
       // clear buffer (preserve original)
@@ -37,11 +76,17 @@ export async function startTcpServer(port: number) {
     });
 
     client.on("end", () => {
-      console.log("❌ TCP client disconnected:", client.remoteAddress);
+      console.log("❌ TCP client disconnected:", {
+        ip: client.remoteAddress,
+        time: new Date().toISOString(),
+      });
     });
 
     client.on("error", (err) => {
-      console.error("⚠️ TCP client error:", err);
+      console.error("⚠️ TCP client error:", {
+        ip: client.remoteAddress,
+        error: err.message,
+      });
     });
   });
 
@@ -50,6 +95,7 @@ export async function startTcpServer(port: number) {
       console.log(`✅ GT06 TCP server listening on port ${port}`);
       resolve();
     });
+
     server.on("error", (err) => {
       console.error("❌ TCP server error:", err);
       reject(err);
