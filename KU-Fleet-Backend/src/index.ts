@@ -13,7 +13,6 @@ import cors from "cors"
 import dotenv from "dotenv"
 import express from 'express'
 import { connectDB } from "./config/db";
-import { redisClient } from "./config/redis";
 import "./workers/tripWorker";
 import "./workers/analyticsWorker";
 import "./workers/cleanupWorker";
