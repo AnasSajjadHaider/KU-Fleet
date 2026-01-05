@@ -65,7 +65,7 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       studentName: student.name,
       busId: bus._id,
       eventType,
-      timestamp: log.createdAt || new Date(),
+      timestamp: log.createdAt ?? log.timestamp
     });
 
     // 9️⃣ Return success

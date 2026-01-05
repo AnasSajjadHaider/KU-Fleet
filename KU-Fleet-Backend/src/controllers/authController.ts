@@ -50,7 +50,7 @@ export const loginUser = async (req: Request, res: Response) => {
     const match = await bcrypt.compare(password, user.password ?? "");
     if (!match) return res.status(401).json({ message: "Invalid credentials" });
 
-    const token = generateToken(user._id as string);
+    const token = generateToken(user._id.toString());
 
     res.status(200).json({
       token,
@@ -107,7 +107,7 @@ export const loginStudent = async (req: Request, res: Response) => {
 
     if (!student) return res.status(404).json({ message: "Invalid RFID card" });
 
-    const token = generateToken(student._id as string);
+    const token = generateToken(student._id.toString());
 
     res.status(200).json({
       token,

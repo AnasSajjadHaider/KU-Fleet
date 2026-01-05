@@ -7,6 +7,8 @@ export interface IRFIDLog extends Document {
   eventType: "BOARD" | "EXIT";
   timestamp: Date;
   trip?: mongoose.Types.ObjectId; // optional link to active trip
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const rfidLogSchema = new Schema<IRFIDLog>(
