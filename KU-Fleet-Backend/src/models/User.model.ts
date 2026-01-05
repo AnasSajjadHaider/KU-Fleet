@@ -1,11 +1,10 @@
-// src/models/User.model.ts
 import mongoose, { Schema } from "mongoose";
 import { IUser } from "../interfaces/User";
 
 const userSchema = new Schema<IUser>(
   {
     name: { type: String, required: true },
-    email: { type: String },
+    email: { type: String }, // optional for students without email
     password: { type: String },
 
     role: {
@@ -33,9 +32,12 @@ const userSchema = new Schema<IUser>(
   { timestamps: true }
 );
 
-// PERFORMANCE: Add indexes for frequently queried fields
-// Index on email (already unique, but explicit for performance)
-userSchema.index({ email: 1 });
+// ----------------------
+// INDEXES
+// ----------------------
+
+// Sparse unique index for email to allow multiple nulls
+userSchema.index({ email: 1 }, { unique: true, sparse: true });
 
 // Index on role for role-based queries
 userSchema.index({ role: 1 });
@@ -46,8 +48,8 @@ userSchema.index({ status: 1 });
 // Index on assignedBus for driver-bus lookups
 userSchema.index({ assignedBus: 1 }, { sparse: true });
 
-// Index on rfidCardUID for RFID lookups (already unique, but explicit)
-userSchema.index({ rfidCardUID: 1 }, { sparse: true });
+// Index on rfidCardUID for RFID lookups (already unique, explicit)
+userSchema.index({ rfidCardUID: 1 }, { unique: true, sparse: true });
 
 // Compound index for role + status queries
 userSchema.index({ role: 1, status: 1 });
