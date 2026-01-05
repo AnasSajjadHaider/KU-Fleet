@@ -1,5 +1,9 @@
 import { Document, Types } from "mongoose";
-
+export interface IBusCamera {
+  deviceId?: string;     // K18 deviceId / IMEI
+  token?: string;        // H5 token
+  channels?: number[];   // default [1, 2]
+}
 export interface IBus extends Document {
   busNumber: string;
   busNumberPlate: string;
@@ -23,4 +27,5 @@ export interface IBus extends Document {
     url: string;
     publicId: string;
   };
+  camera?: IBusCamera;
 }
