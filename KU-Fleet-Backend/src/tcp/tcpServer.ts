@@ -65,6 +65,8 @@ export async function startTcpServer(port: number) {
         try {
           // Original behavior preserved
           await handleParsedMessage(msg);
+          console.log(`✅ Message passed to handleParsedMessage for IMEI: ${msg.imei}, Event: ${msg.event?.string}`);
+
         } catch (err) {
           console.error("❌ Error handling parsed message:", err);
         }
