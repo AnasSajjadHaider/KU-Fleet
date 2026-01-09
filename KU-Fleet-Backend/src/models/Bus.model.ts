@@ -31,13 +31,10 @@ const busSchema = new Schema<IBus>(
     },
     // add this inside busSchema fields
     camera: {
-      deviceId: { type: String }, // K18 deviceId / IMEI
-      token: { type: String },    // H5 token (replaceable anytime)
-      channels: {
-        type: [Number],
-        default: [1, 2],          // K18 has 2 channels
-      },
-},
+      deviceId: { type: String },          // fixed hardware id
+      channels: { type: [Number], default: [1] }
+    }
+    
 
   },
   { timestamps: true }

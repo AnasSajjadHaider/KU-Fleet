@@ -7,6 +7,7 @@ import { connectDB } from "./config/db";
 import { app } from "./app";
 import { startTcpServer } from "./tcp/tcpServer";
 import { setSocketIO, ROOMS, EVENTS } from "./utils/socketHelper";
+import { getValidMtxToken } from "./utils/getValidMtxToken";
 
 dotenv.config();
 
@@ -15,6 +16,24 @@ const TCP_PORT = Number(process.env.TCP_PORT || 5050);
 
 async function start() {
   await connectDB();
+  
+  // 🔐 Initialize MTX token immediately on startup
+  try {
+    await getValidMtxToken();
+    console.log("✅ MTX token initialized");
+  } catch (e) {
+    console.error("❌ MTX token init failed", e);
+  }
+
+  // 🔁 Keep MTX token alive (every hour)
+  setInterval(async () => {
+    try {
+      await getValidMtxToken();
+      console.log("🔁 MTX token refreshed");
+    } catch (e) {
+      console.error("❌ MTX keep-alive failed", e);
+    }
+  }, 60 * 60 * 1000); // every 1 hour
 
   // Create HTTP server from Express app
   const server = http.createServer(app);

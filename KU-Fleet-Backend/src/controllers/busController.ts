@@ -11,6 +11,7 @@ import { bufferCoordinate } from "../services/gpsBuffer";
 import { getSocketIO, ROOMS, EVENTS } from "../utils/socketHelper";
 import { wrapAsync, AppError } from "../middleware/errorHandler";
 import { isValidLatitude, isValidLongitude, validateRequired } from "../utils/validation";
+import { buildCameraStreamUrl } from "../utils/buildCameraURL";
 
 // GET /api/buses — List all buses
 /** ✅ Get all buses */
@@ -28,7 +29,30 @@ export const getBuses = async (_req: Request, res: Response) => {
       .populate("driver", "name email photo")
       .sort({ createdAt: -1 });
 
-    res.status(200).json({ success: true, count: buses.length, buses });
+      const busesWithCamera = await Promise.all(
+        buses.map(async (bus) => {
+          let cameraStreamUrl = null;
+      
+          if (bus.camera?.deviceId) {
+            cameraStreamUrl = await buildCameraStreamUrl(
+              bus.camera.deviceId,
+              bus.camera.channels?.[0] || 1
+            );
+          }
+      
+          return {
+            ...bus.toObject(),
+            cameraStreamUrl,
+          };
+        })
+      );
+      
+      res.status(200).json({
+        success: true,
+        count: busesWithCamera.length,
+        buses: busesWithCamera,
+      });
+      
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch buses", error });
   }
@@ -45,7 +69,23 @@ export const getBusById = async (req: Request, res: Response) => {
 
     if (!bus) return res.status(404).json({ message: "Bus not found" });
 
-    res.status(200).json({ success: true, bus });
+    let cameraStreamUrl = null;
+
+    if (bus.camera?.deviceId) {
+      cameraStreamUrl = await buildCameraStreamUrl(
+        bus.camera.deviceId,
+        bus.camera.channels?.[0] || 1
+      );
+    }
+    
+    res.status(200).json({
+      success: true,
+      bus: {
+        ...bus.toObject(),
+        cameraStreamUrl,
+      },
+    });
+    
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch bus", error });
   }
