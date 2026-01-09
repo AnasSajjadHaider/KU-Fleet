@@ -9,58 +9,52 @@ import User from "../models/User.model";
 import { cacheHelpers, redisClient } from "../config/redis";
 import { bufferCoordinate } from "../services/gpsBuffer";
 import { getSocketIO, ROOMS, EVENTS } from "../utils/socketHelper";
-import { wrapAsync, AppError } from "../middleware/errorHandler";
-import { isValidLatitude, isValidLongitude, validateRequired } from "../utils/validation";
 import { buildCameraStreamUrl } from "../utils/buildCameraURL";
+import { IBus } from "../interfaces/Bus";
 
 // GET /api/buses — List all buses
 /** ✅ Get all buses */
+// GET /api/buses — List all buses
+const generateCameraStreamUrls = async (bus: IBus): Promise<Record<number, string>> => {
+  const urls: Record<number, string> = {};
+  if (!bus.camera?.deviceId) return urls;
+  const channels = bus.camera.channels ?? [1]; // default to [1] if undefined
+  for (const ch of channels) {
+    urls[ch] = await buildCameraStreamUrl(bus.camera.deviceId, ch);
+  }
+  return urls;
+};
+
+// ------------------------ GET ALL BUSES ------------------------
 export const getBuses = async (_req: Request, res: Response) => {
   try {
     const buses = await Bus.find()
       .populate({
         path: "route",
         select: "routeName stations",
-        populate: {
-          path: "stations",
-          select: "stationName", // You can add more fields if needed
-        },
+        populate: { path: "stations", select: "stationName" },
       })
       .populate("driver", "name email photo")
       .sort({ createdAt: -1 });
 
-      const busesWithCamera = await Promise.all(
-        buses.map(async (bus) => {
-          let cameraStreamUrl = null;
-      
-          if (bus.camera?.deviceId) {
-            cameraStreamUrl = await buildCameraStreamUrl(
-              bus.camera.deviceId,
-              bus.camera.channels?.[0] || 1
-            );
-          }
-      
-          return {
-            ...bus.toObject(),
-            cameraStreamUrl,
-          };
-        })
-      );
-      
-      res.status(200).json({
-        success: true,
-        count: busesWithCamera.length,
-        buses: busesWithCamera,
-      });
-      
+    const busesWithCamera = await Promise.all(
+      buses.map(async (bus) => ({
+        ...bus.toObject(),
+        cameraStreamUrls: await generateCameraStreamUrls(bus),
+      }))
+    );
+
+    res.status(200).json({
+      success: true,
+      count: busesWithCamera.length,
+      buses: busesWithCamera,
+    });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch buses", error });
   }
 };
 
-
-// GET /api/buses/:id — Get single bus details
-/** ✅ Get single bus by ID */
+// ------------------------ GET SINGLE BUS ------------------------
 export const getBusById = async (req: Request, res: Response) => {
   try {
     const bus = await Bus.findById(req.params.id)
@@ -69,23 +63,15 @@ export const getBusById = async (req: Request, res: Response) => {
 
     if (!bus) return res.status(404).json({ message: "Bus not found" });
 
-    let cameraStreamUrl = null;
+    const cameraStreamUrls = await generateCameraStreamUrls(bus);
 
-    if (bus.camera?.deviceId) {
-      cameraStreamUrl = await buildCameraStreamUrl(
-        bus.camera.deviceId,
-        bus.camera.channels?.[0] || 1
-      );
-    }
-    
     res.status(200).json({
       success: true,
       bus: {
         ...bus.toObject(),
-        cameraStreamUrl,
+        cameraStreamUrls,
       },
     });
-    
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch bus", error });
   }
