@@ -4,21 +4,21 @@ import TripLog from "../models/TripLog.model";
 import Bus from "../models/Bus.model";
 import Alert from "../models/Alert.model";
 import dotenv from "dotenv";
+import { ITripCoordinate } from "../interfaces/TripLog";
 dotenv.config();
 
 /* ----------------------------------------------
  * TYPES
  * ---------------------------------------------- */
-
 export interface ICoords {
   lat: number;
   lng: number;
+  speed?: number;
 }
 
 export interface ISaveTripSegmentPayload {
   busId: string;
   coords: ICoords;
-  speed?: number;
   timestamp?: string | number | Date;
 }
 
@@ -40,100 +40,79 @@ export interface IUpdateBusStatusPayload {
 }
 
 /* ----------------------------------------------
- * Local in-process cache throttle (reduces Redis ops)
+ * LOCAL CACHE THROTTLE
  * ---------------------------------------------- */
+const REDIS_LOCATION_THROTTLE_SEC = Number(process.env.REDIS_LOCATION_THROTTLE_SEC ?? 10);
+const BUS_CACHE_TTL = Number(process.env.BUS_CACHE_TTL_SEC ?? 180);
 
-const REDIS_LOCATION_THROTTLE_SEC = Number(process.env.REDIS_LOCATION_THROTTLE_SEC ?? 10); // secs
-const BUS_CACHE_TTL = Number(process.env.BUS_CACHE_TTL_SEC ?? 180); // seconds
-
-// Track last write times and last values per bus to avoid redundant writes
 const lastCacheWriteAt: Map<string, number> = new Map();
-const lastCacheValue: Map<string, { lat: number; lng: number; speed?: number }> = new Map();
+const lastCacheValue: Map<string, ICoords> = new Map();
 
-function shouldWriteCache(busId: string, coords: { lat: number; lng: number; speed?: number }) {
+function shouldWriteCache(busId: string, coords: ICoords) {
   const now = Date.now();
   const lastAt = lastCacheWriteAt.get(busId) ?? 0;
-  const elapsed = now - lastAt;
-  if (elapsed < REDIS_LOCATION_THROTTLE_SEC * 1000) return false;
+  if (now - lastAt < REDIS_LOCATION_THROTTLE_SEC * 1000) return false;
 
   const lastVal = lastCacheValue.get(busId);
   if (!lastVal) return true;
-  // Small threshold to avoid micro-movements causing writes
-  const moved =
-    Math.abs((lastVal.lat ?? 0) - coords.lat) > 0.0001 ||
-    Math.abs((lastVal.lng ?? 0) - coords.lng) > 0.0001 ||
-    Math.abs((lastVal.speed ?? 0) - (coords.speed ?? 0)) > 5;
 
-  return moved;
+  return (
+    Math.abs(lastVal.lat - coords.lat) > 0.0001 ||
+    Math.abs(lastVal.lng - coords.lng) > 0.0001 ||
+    Math.abs((lastVal.speed ?? 0) - (coords.speed ?? 0)) > 5
+  );
 }
 
 /* ----------------------------------------------
  * SERVICE
  * ---------------------------------------------- */
-
 export const TripService = {
   /**
    * SAVE TRIP SEGMENT
    */
-  async saveTripSegment({
-    busId,
-    coords,
-    speed,
-    timestamp,
-  }: ISaveTripSegmentPayload): Promise<void> {
+  async saveTripSegment({ busId, coords, timestamp }: ISaveTripSegmentPayload): Promise<void> {
+    if (!busId || !coords) return;
+
     const ts = timestamp ? new Date(timestamp) : new Date();
+    const coord: ITripCoordinate = {
+      lat: coords.lat,
+      lng: coords.lng,
+      speed: coords.speed ?? 0,
+      timestamp: ts,
+    };
 
-    if (!busId || !coords) {
-      console.warn("⚠️ Invalid saveTripSegment payload");
-      return;
-    }
-
-    // Persist coordinate to DB (append) - required for trip history
     try {
       await TripLog.updateOne(
         { bus: busId, endTime: null },
         {
-          $push: { coordinates: coords },
-          $set: {
-            lastUpdate: ts,
-            currentSpeed: speed ?? 0,
-          },
+          $push: { coordinates: coord },
+          $set: { lastUpdate: ts, currentSpeed: coord.speed },
         }
       );
     } catch (err) {
       console.error("❌ TripLog updateOne failed:", err);
-      // continue - DB failing is serious but we still try to preserve other flows
     }
 
-    // Throttled cache write (non-blocking)
     try {
-      const cachePayload = { lat: coords.lat, lng: coords.lng, speed: speed ?? 0, timestamp: ts };
-      if (shouldWriteCache(busId, cachePayload)) {
-        // Fire-and-forget to avoid blocking; capture errors
-        cacheHelpers.setBusLocation(busId, cachePayload, BUS_CACHE_TTL)
-          .then(() => {
-            lastCacheWriteAt.set(busId, Date.now());
-            lastCacheValue.set(busId, { lat: cachePayload.lat, lng: cachePayload.lng, speed: cachePayload.speed });
-          })
-          .catch((err) => {
-            console.warn("⚠️ setBusLocation non-fatal error:", err);
-          });
+      if (shouldWriteCache(busId, coord)) {
+        await cacheHelpers.setBusLocation(busId, coord, BUS_CACHE_TTL);
+        lastCacheWriteAt.set(busId, Date.now());
+        lastCacheValue.set(busId, coord);
       }
     } catch (err) {
-      console.warn("⚠️ Cache throttle check failed:", err);
+      console.warn("⚠️ Cache write failed:", err);
     }
 
-    // Overspeed alert (keeps original behavior)
-    if (speed && speed > 80) {
+    // Overspeed alert
+    if (coord.speed > 80) {
       try {
         await Alert.create({
           bus: busId,
           type: "overspeed",
-          message: `Bus exceeded speed limit: ${speed} km/h`,
+          message: `Bus exceeded speed limit: ${coord.speed} km/h`,
           priority: "high",
           timestamp: ts,
         });
-        console.log(`⚠️ Overspeed alert created for bus ${busId}: ${speed} km/h`);
       } catch (err) {
         console.error("❌ Alert.create failed:", err);
       }
@@ -144,101 +123,81 @@ export const TripService = {
    * END TRIP
    */
   async endTrip({ busId, endCoords }: IEndTripPayload): Promise<void> {
-    if (!busId) {
-      console.warn("⚠️ endTrip without busId");
-      return;
-    }
+    if (!busId) return;
 
     try {
-      await TripLog.updateOne(
-        { bus: busId, endTime: null },
-        {
-          $set: {
-            endTime: new Date(),
-            endCoordinates: endCoords || null,
-          },
-        }
-      );
+      const trip = await TripLog.findOne({ bus: busId, endTime: null });
+      if (!trip) return;
+
+      // Push final coordinate if provided
+      if (endCoords) {
+        const finalCoord: ITripCoordinate = {
+          lat: endCoords.lat,
+          lng: endCoords.lng,
+          speed: endCoords.speed ?? 0,
+          timestamp: new Date(),
+        };
+        trip.coordinates.push(finalCoord);
+      }
+
+      trip.endTime = new Date();
+      trip.status = "completed";
+
+      await trip.save();
     } catch (err) {
-      console.error("❌ TripLog endTrip update failed:", err);
+      console.error("❌ TripLog endTrip failed:", err);
     }
 
-    // Clear cache in a safe non-blocking way
+    // Clear cache
     try {
-      cacheHelpers.clearBusLocation(busId).catch((err) => {
-        console.warn("⚠️ clearBusLocation non-fatal error:", err);
-      });
+      await cacheHelpers.clearBusLocation(busId);
       lastCacheWriteAt.delete(busId);
       lastCacheValue.delete(busId);
     } catch (err) {
-      console.warn("⚠️ Clearing in-memory throttle failed:", err);
+      console.warn("⚠️ Cache clearing failed:", err);
     }
-
-    console.log(`🛑 Trip ended for bus ${busId}`);
   },
 
   /**
    * DAILY CLEANUP
    */
   async dailyCleanup(): Promise<void> {
-    const retentionDays = parseInt(process.env.TRIP_RETENTION_DAYS || "7");
+    const retentionDays = Number(process.env.TRIP_RETENTION_DAYS ?? 7);
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - retentionDays);
 
     try {
-      const deleted = await TripLog.deleteMany({
-        createdAt: { $lt: cutoff },
-        endTime: { $ne: null },
-      });
-
+      const deleted = await TripLog.deleteMany({ createdAt: { $lt: cutoff }, endTime: { $ne: null } });
       console.log(`🧹 Deleted ${deleted.deletedCount} old trip logs`);
     } catch (err) {
-      console.error("❌ dailyCleanup deleteMany failed:", err);
+      console.error("❌ dailyCleanup failed:", err);
     }
   },
 
   /**
    * UPDATE BUS STATUS
    */
-  async updateBusStatus({
-    busId,
-    status,
-    location,
-  }: IUpdateBusStatusPayload): Promise<void> {
-    if (!busId) {
-      console.warn("⚠️ updateBusStatus without busId");
-      return;
-    }
+  async updateBusStatus({ busId, status, location }: IUpdateBusStatusPayload): Promise<void> {
+    if (!busId) return;
 
     try {
       await Bus.findByIdAndUpdate(busId, {
         status: status ?? "inactive",
-        lastLocation: location || null,
+        lastLocation: location ?? null,
         lastUpdate: new Date(),
       });
     } catch (err) {
       console.error("❌ Bus.findByIdAndUpdate failed:", err);
     }
 
-    // Throttled cache write if location exists
-    if (location) {
+    if (location && shouldWriteCache(busId, location)) {
       try {
-        const cachePayload = { lat: location.lat, lng: location.lng, speed: location.speed ?? 0, timestamp: new Date() };
-        if (shouldWriteCache(busId, cachePayload)) {
-          cacheHelpers.setBusLocation(busId, cachePayload, BUS_CACHE_TTL)
-            .then(() => {
-              lastCacheWriteAt.set(busId, Date.now());
-              lastCacheValue.set(busId, { lat: cachePayload.lat, lng: cachePayload.lng, speed: cachePayload.speed });
-            })
-            .catch((err) => {
-              console.warn("⚠️ setBusLocation non-fatal error:", err);
-            });
-        }
+        await cacheHelpers.setBusLocation(busId, { ...location, timestamp: new Date() }, BUS_CACHE_TTL);
+        lastCacheWriteAt.set(busId, Date.now());
+        lastCacheValue.set(busId, location);
       } catch (err) {
-        console.warn("⚠️ updateBusStatus cache path failed:", err);
+        console.warn("⚠️ Cache update failed:", err);
       }
     }
-
-    console.log(`📍 Updated bus ${busId} status → ${status}`);
   },
 };

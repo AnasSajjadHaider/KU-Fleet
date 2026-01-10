@@ -1,17 +1,54 @@
+// src/services/analytics.service.ts
 import TripLog from "../models/TripLog.model";
 import Bus from "../models/Bus.model";
 import Alert from "../models/Alert.model";
 import { cacheHelpers } from "../config/redis";
 
-function formatDate(d: Date) {
-  return d.toISOString().split("T")[0];
+/* -------------------- TYPES -------------------- */
+interface DailyAnalytics {
+  date: string;
+  totalTrips: number;
+  completedTrips: number;
+  alertsToday: number;
+  activeBuses: number;
+  totalBuses: number;
+  completionRate: number;
+  utilizationRate: number;
 }
 
-export async function generateDailyAnalytics() {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+interface BusAnalytics {
+  busId: string;
+  date: string;
+  tripsCount: number;
+  totalDistance: number;
+  averageSpeed: number;
+  alertsCount: number;
+}
 
+interface RouteAnalytics {
+  routeId: string;
+  date: string;
+  tripsCount: number;
+  totalPassengers: number;
+  totalDistance: number;
+  averagePassengers: number;
+}
+
+/* -------------------- HELPERS -------------------- */
+function formatDate(d: Date): string {
+  return d.toISOString().split("T")[0]!;
+}
+
+function getTodayRange(): { start: Date; end: Date } {
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+  return { start, end };
+}
+
+/* -------------------- DAILY ANALYTICS -------------------- */
+export async function generateDailyAnalytics(): Promise<void> {
+  const { start, end } = getTodayRange();
   const dateKey = formatDate(start);
 
   const [totalTrips, completedTrips, activeBuses, totalBuses, alertsToday] =
@@ -23,32 +60,31 @@ export async function generateDailyAnalytics() {
       Alert.countDocuments({ timestamp: { $gte: start, $lte: end } }),
     ]);
 
-  const analytics = {
+  const analytics: DailyAnalytics = {
     date: dateKey,
     totalTrips,
     completedTrips,
     alertsToday,
     activeBuses,
     totalBuses,
-    completionRate: totalTrips ? (completedTrips / totalTrips) * 100 : 0,
-    utilizationRate: totalBuses ? (activeBuses / totalBuses) * 100 : 0,
+    completionRate: totalTrips > 0 ? (completedTrips / totalTrips) * 100 : 0,
+    utilizationRate: totalBuses > 0 ? (activeBuses / totalBuses) * 100 : 0,
   };
 
   await cacheHelpers.setAnalyticsData(`daily:${dateKey}`, analytics, 86400);
-  console.log("Daily analytics saved:", analytics);
+  console.log("📊 Daily analytics saved:", analytics);
 }
 
-export async function generateBusAnalytics(busId: string) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+/* -------------------- BUS ANALYTICS -------------------- */
+export async function generateBusAnalytics(busId: string): Promise<void> {
+  const { start, end } = getTodayRange();
   const dateKey = formatDate(start);
 
   const trips = await TripLog.find({ bus: busId, startTime: { $gte: start, $lte: end } });
 
-  const totalDistance = trips.reduce((a, t) => a + (t.distance || 0), 0);
-  const avgSpeed = trips.length
-    ? trips.reduce((a, t) => a + (t.avgSpeed || 0), 0) / trips.length
+  const totalDistance = trips.reduce((acc, t) => acc + (t.distance ?? 0), 0);
+  const averageSpeed = trips.length
+    ? trips.reduce((acc, t) => acc + (t.avgSpeed ?? 0), 0) / trips.length
     : 0;
 
   const alertsCount = await Alert.countDocuments({
@@ -56,39 +92,36 @@ export async function generateBusAnalytics(busId: string) {
     timestamp: { $gte: start, $lte: end },
   });
 
-  const analytics = {
+  const analytics: BusAnalytics = {
     busId,
     date: dateKey,
     tripsCount: trips.length,
     totalDistance,
-    averageSpeed: avgSpeed,
+    averageSpeed,
     alertsCount,
   };
 
   await cacheHelpers.setAnalyticsData(`bus:${busId}:${dateKey}`, analytics, 86400);
 }
 
-export async function generateRouteAnalytics(routeId: string) {
-  const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+/* -------------------- ROUTE ANALYTICS -------------------- */
+export async function generateRouteAnalytics(routeId: string): Promise<void> {
+  const { start, end } = getTodayRange();
   const dateKey = formatDate(start);
 
-  const trips = await TripLog.find({
-    route: routeId,
-    startTime: { $gte: start, $lte: end },
-  });
+  const trips = await TripLog.find({ route: routeId, startTime: { $gte: start, $lte: end } });
 
-  const totalPassengers = trips.reduce((a, t) => a + (t.passengerCount || 0), 0);
-  const totalDistance = trips.reduce((a, t) => a + (t.distance || 0), 0);
+  const totalPassengers = trips.reduce((acc, t) => acc + (t.passengerCount ?? 0), 0);
+  const totalDistance = trips.reduce((acc, t) => acc + (t.distance ?? 0), 0);
+  const averagePassengers = trips.length ? totalPassengers / trips.length : 0;
 
-  const analytics = {
+  const analytics: RouteAnalytics = {
     routeId,
     date: dateKey,
     tripsCount: trips.length,
     totalPassengers,
     totalDistance,
-    averagePassengers: trips.length ? totalPassengers / trips.length : 0,
+    averagePassengers,
   };
 
   await cacheHelpers.setAnalyticsData(`route:${routeId}:${dateKey}`, analytics, 86400);

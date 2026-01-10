@@ -21,10 +21,10 @@ import uploadRoutes from "./routes/uploadRoutes";
 import rfidRoutes from "./routes/rfidRoutes";
 
 // Workers/cron jobs
-import "./workers/tripWorker";
-import "./workers/analyticsWorker";
-import "./workers/cleanupWorker";
+// Workers (single entry point)
+import "./workers/workers";
 import "./workers/cronJobs";
+
 
 dotenv.config();
 

@@ -1,4 +1,5 @@
-import { Worker } from "bullmq";
+// src/workers/cleanupWorker.ts
+import { Worker, Job } from "bullmq";
 import { redisClient } from "../config/redis";
 import TripLog from "../models/TripLog.model";
 import Alert from "../models/Alert.model";
@@ -7,16 +8,16 @@ import dotenv from "dotenv";
 dotenv.config();
 
 /* --------------------- Safety Controls ---------------------- */
-
 let redisHealthy = true;
 let lastRedisError = 0;
 const REDIS_COOLDOWN = 1000 * 60 * 10; // 10 minutes cooldown
 
-function handleRedisError(err: any, jobName: string) {
-  console.error(`❌ Redis error in cleanup worker (${jobName}):`, err.message);
+function handleRedisError(err: unknown, jobName: string) {
+  const message = err instanceof Error ? err.message : JSON.stringify(err);
+  console.error(`❌ Redis error in cleanup worker (${jobName}):`, message);
   redisHealthy = false;
   lastRedisError = Date.now();
-}
+} 
 
 function isRedisInCooldown() {
   if (!redisHealthy) {
@@ -27,9 +28,7 @@ function isRedisInCooldown() {
 }
 
 /* --------------------- Helper: Safe SCAN ---------------------- */
-
-// Safe SCAN wrapper (never use KEYS in production)
-async function scanKeys(pattern: string) {
+async function scanKeys(pattern: string): Promise<string[]> {
   const found: string[] = [];
   let cursor = "0";
 
@@ -48,10 +47,9 @@ async function scanKeys(pattern: string) {
 }
 
 /* --------------------- Worker Definition ---------------------- */
-
 export const cleanupWorker = new Worker(
   "cleanupQueue",
-  async (job) => {
+  async (job: Job) => {
     console.log(`🧽 Processing cleanup job: ${job.name}`);
 
     if (isRedisInCooldown()) {
@@ -62,12 +60,12 @@ export const cleanupWorker = new Worker(
     try {
       /* ---------------- Cleanup 1: Old Trip Logs ---------------- */
       if (job.name === "cleanupOldTripLogs") {
-        const retention = parseInt(process.env.TRIP_RETENTION_DAYS || "7");
+        const retention = parseInt(process.env.TRIP_RETENTION_DAYS || "7", 10);
         const cutoff = new Date(Date.now() - retention * 86400000);
 
         const deleted = await TripLog.deleteMany({
           createdAt: { $lt: cutoff },
-          endTime: { $ne: null }
+          endTime: { $ne: null },
         });
 
         console.log(`🗑️ Deleted ${deleted.deletedCount} old trip logs`);
@@ -75,12 +73,12 @@ export const cleanupWorker = new Worker(
 
       /* ---------------- Cleanup 2: Old Alerts ---------------- */
       if (job.name === "cleanupOldAlerts") {
-        const retention = parseInt(process.env.ALERT_RETENTION_DAYS || "30");
+        const retention = parseInt(process.env.ALERT_RETENTION_DAYS || "30", 10);
         const cutoff = new Date(Date.now() - retention * 86400000);
 
         const deleted = await Alert.deleteMany({
           createdAt: { $lt: cutoff },
-          resolved: true
+          resolved: true,
         });
 
         console.log(`🗑️ Deleted ${deleted.deletedCount} resolved alerts`);
@@ -88,11 +86,11 @@ export const cleanupWorker = new Worker(
 
       /* ---------------- Cleanup 3: Old Feedback ---------------- */
       if (job.name === "cleanupOldFeedback") {
-        const retention = parseInt(process.env.FEEDBACK_RETENTION_DAYS || "90");
+        const retention = parseInt(process.env.FEEDBACK_RETENTION_DAYS || "90", 10);
         const cutoff = new Date(Date.now() - retention * 86400000);
 
         const deleted = await Feedback.deleteMany({
-          createdAt: { $lt: cutoff }
+          createdAt: { $lt: cutoff },
         });
 
         console.log(`🗑️ Deleted ${deleted.deletedCount} old feedback`);
@@ -103,28 +101,23 @@ export const cleanupWorker = new Worker(
         const keys = await scanKeys("analytics:*");
         let cleared = 0;
 
-        // Batch TTL checks to reduce Redis calls
         if (keys.length > 0) {
           const pipeline = redisClient.pipeline();
-          keys.forEach(key => pipeline.ttl(key));
+          keys.forEach((key) => pipeline.ttl(key));
           const results = await pipeline.exec();
-          
           const keysToDelete: string[] = [];
+
           results?.forEach((result, index) => {
-            if (result && result[1] === -1 && keys[index]) {
-              keysToDelete.push(keys[index]);
-            }
+            const [err, ttl] = result ?? [null, null];
+            if (!err && ttl === -1 && keys[index]) keysToDelete.push(keys[index]);
           });
 
-          // Batch delete expired keys
-          if (keysToDelete.length > 0) {
-            const chunkSize = 100;
-            for (let i = 0; i < keysToDelete.length; i += chunkSize) {
-              const chunk = keysToDelete.slice(i, i + chunkSize).filter((k): k is string => k !== undefined);
-              if (chunk.length > 0) {
-                await redisClient.del(...chunk);
-                cleared += chunk.length;
-              }
+          const chunkSize = 100;
+          for (let i = 0; i < keysToDelete.length; i += chunkSize) {
+            const chunk = keysToDelete.slice(i, i + chunkSize);
+            if (chunk.length > 0) {
+              await redisClient.del(...chunk);
+              cleared += chunk.length;
             }
           }
         }
@@ -134,48 +127,45 @@ export const cleanupWorker = new Worker(
 
       /* ---------------- Cleanup 5: Data Archiving ---------------- */
       if (job.name === "archiveOldData") {
-        const days = parseInt(process.env.ARCHIVE_DAYS || "30");
+        const days = parseInt(process.env.ARCHIVE_DAYS || "30", 10);
         const cutoff = new Date(Date.now() - days * 86400000);
 
         const archived = await TripLog.updateMany(
           {
             createdAt: { $lt: cutoff },
-            endTime: { $ne: null }
+            endTime: { $ne: null },
           },
           { $set: { archived: true } }
         );
 
         console.log(`📦 Archived ${archived.modifiedCount} trip logs`);
       }
-
-    } catch (err: any) {
-      if (err?.code === "ECONNRESET" || err?.message?.includes("Redis")) {
-        handleRedisError(err, job.name);
-      }
-      console.error(`❌ Error in cleanup job ${job.name}:`, err);
-      throw err; // Allow BullMQ to retry
+    } catch (err: unknown) {
+      handleRedisError(err, job.name);
+      throw err; // allow BullMQ to retry
     }
   },
   {
     connection: redisClient,
     concurrency: 2,
     removeOnComplete: { count: 20 },
-    removeOnFail: { count: 10 }
+    removeOnFail: { count: 10 },
   }
 );
 
 /* --------------------- Worker Monitoring ---------------------- */
-
 cleanupWorker.on("completed", (job) => {
   console.log(`✔️ Cleanup job completed: ${job.name}`);
 });
 
-cleanupWorker.on("failed", (job, err) => {
-  console.error(`❌ Cleanup job failed: ${job?.name}`, err.message);
+cleanupWorker.on("failed", (job, err: unknown) => {
+  const message = err instanceof Error ? err.message : JSON.stringify(err);
+  console.error(`❌ Cleanup job failed: ${job?.name}`, message);
 });
 
-cleanupWorker.on("error", (err) => {
-  console.error("💥 Worker-level error:", err.message);
+cleanupWorker.on("error", (err: unknown) => {
+  const message = err instanceof Error ? err.message : JSON.stringify(err);
+  console.error("💥 Worker-level error:", message);
   redisHealthy = false;
   lastRedisError = Date.now();
 });

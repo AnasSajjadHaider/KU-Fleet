@@ -57,6 +57,16 @@ export const handleRfidScan = async (req: Request, res: Response) => {
       eventType,
       trip: activeTrip?._id,
     });
+    if (activeTrip) {
+      const delta = eventType === "BOARD" ? 1 : -1;
+    
+      await TripLog.findByIdAndUpdate(
+        activeTrip._id,
+        { $inc: { passengerCount: delta } },
+        { new: true }
+      );
+    }
+    
 
     // 8️⃣ Emit socket event for real-time updates
     const io = req.app.get("io");

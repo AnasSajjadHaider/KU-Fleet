@@ -1,7 +1,7 @@
+// src/workers/cronJobs.ts
 import * as cron from "node-cron";
 import { tripQueue, analyticsQueue, cleanupQueue } from "./queue";
 import { AnalyticsJobPayload } from "./workers";
- // adjust path if needed
 
 // --- Internal Health + Rate Limit ---
 let redisHealthy = true;
@@ -15,13 +15,13 @@ async function safeJob(fn: () => Promise<void>, label: string) {
       console.warn(`⏳ Skipping ${label} — Redis in cooldown mode`);
       return;
     }
-    redisHealthy = true; // Try again after cooldown
+    redisHealthy = true; // Retry after cooldown
   }
 
   try {
     await fn();
-  } catch (err: any) {
-    if (err?.code === "ECONNRESET" || err?.message?.includes("Redis")) {
+  } catch (err: unknown) {
+    if (err instanceof Error && (err.message.includes("Redis") || (err as any).code === "ECONNRESET")) {
       redisHealthy = false;
       lastRedisErrorTime = Date.now();
       console.error(`❌ Redis connection issue during ${label}:`, err.message);
@@ -39,21 +39,9 @@ cron.schedule("0 2 * * *", async () =>
     console.log("🔄 Starting daily cleanup job...");
 
     await cleanupQueue.addBulk([
-      {
-        name: "cleanupOldTripLogs",
-        data: {},
-        opts: { attempts: 3, backoff: { type: "exponential", delay: 2000 } },
-      },
-      {
-        name: "cleanupOldAlerts",
-        data: {},
-        opts: { attempts: 3, delay: 1000, backoff: { type: "exponential", delay: 2000 } },
-      },
-      {
-        name: "cleanupOldFeedback",
-        data: {},
-        opts: { attempts: 3, delay: 2000, backoff: { type: "exponential", delay: 2000 } },
-      },
+      { name: "cleanupOldTripLogs", data: {}, opts: { attempts: 3, backoff: { type: "exponential", delay: 2000 } } },
+      { name: "cleanupOldAlerts", data: {}, opts: { attempts: 3, backoff: { type: "exponential", delay: 2000 } } },
+      { name: "cleanupOldFeedback", data: {}, opts: { attempts: 3, backoff: { type: "exponential", delay: 2000 } } },
     ]);
 
     console.log("✅ Daily cleanup jobs scheduled");
@@ -67,6 +55,7 @@ cron.schedule("0 1 * * *", async () =>
 
     const payload: AnalyticsJobPayload = { type: "daily" };
 
+    // ✅ No generic needed
     await analyticsQueue.add("generateDailyAnalytics", payload, {
       attempts: 3,
       backoff: { type: "exponential", delay: 2000 },

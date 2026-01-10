@@ -10,7 +10,7 @@ import Bus from "../models/Bus.model";
 export const logBusPosition = async (req: Request, res: Response) => {
   try {
     const { busId, lat, lng, speed } = req.body;
-
+ 
     if (!busId || !lat || !lng)
       return res.status(400).json({ message: "Bus ID, lat, and lng are required" });
 
@@ -32,7 +32,9 @@ export const logBusPosition = async (req: Request, res: Response) => {
         bus: busId,
         startTime: new Date(),
         coordinates: [],
+        status: "active",
       });
+      
     }
 
     trip.coordinates.push({ lat, lng, speed, timestamp: new Date() });
