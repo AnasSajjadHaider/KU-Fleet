@@ -13,7 +13,8 @@ export interface ITripLog extends Document {
     timestamp?: Date;
   }[];
   distance?: number;
-  passengerCount: number,
+  duration?: number;       // NEW
+  passengerCount: number;
   avgSpeed?: number;
   maxSpeed?: number;
   stopsCount?: number;
@@ -36,6 +37,7 @@ const tripLogSchema = new Schema<ITripLog>(
       },
     ],
     distance: { type: Number, default: 0 },
+    duration: { type: Number, default: 0 }, // NEW
     avgSpeed: { type: Number, default: 0 },
     maxSpeed: { type: Number, default: 0 },
     stopsCount: { type: Number, default: 0 },
@@ -49,6 +51,7 @@ const tripLogSchema = new Schema<ITripLog>(
   { timestamps: true }
 );
 
+// Indexes for performance
 tripLogSchema.index({ bus: 1, startTime: -1 });
 tripLogSchema.index({ driver: 1 });
 tripLogSchema.index({ route: 1 });

@@ -3,6 +3,7 @@ import TripLog from "../models/TripLog.model";
 import Bus from "../models/Bus.model";
 import Alert from "../models/Alert.model";
 import { cacheHelpers } from "../config/redis";
+import { AlertService } from "./alert.service";
 
 /* -------------------- TYPES -------------------- */
 interface DailyAnalytics {
@@ -71,7 +72,7 @@ export async function generateDailyAnalytics(): Promise<void> {
     utilizationRate: totalBuses > 0 ? (activeBuses / totalBuses) * 100 : 0,
   };
 
-  await cacheHelpers.setAnalyticsData(`daily:${dateKey}`, analytics, 86400);
+  await cacheHelpers.setAnalyticsData(`daily:${dateKey}`, analytics, 86400); // 24h
   console.log("📊 Daily analytics saved:", analytics);
 }
 
@@ -83,14 +84,9 @@ export async function generateBusAnalytics(busId: string): Promise<void> {
   const trips = await TripLog.find({ bus: busId, startTime: { $gte: start, $lte: end } });
 
   const totalDistance = trips.reduce((acc, t) => acc + (t.distance ?? 0), 0);
-  const averageSpeed = trips.length
-    ? trips.reduce((acc, t) => acc + (t.avgSpeed ?? 0), 0) / trips.length
-    : 0;
+  const averageSpeed = trips.length ? trips.reduce((acc, t) => acc + (t.avgSpeed ?? 0), 0) / trips.length : 0;
 
-  const alertsCount = await Alert.countDocuments({
-    bus: busId,
-    timestamp: { $gte: start, $lte: end },
-  });
+  const alertsCount = await Alert.countDocuments({ bus: busId, timestamp: { $gte: start, $lte: end } });
 
   const analytics: BusAnalytics = {
     busId,
@@ -126,3 +122,24 @@ export async function generateRouteAnalytics(routeId: string): Promise<void> {
 
   await cacheHelpers.setAnalyticsData(`route:${routeId}:${dateKey}`, analytics, 86400);
 }
+
+/* -------------------- ALERT TREND ANALYTICS -------------------- */
+/* -------------------- ALERT TRENDS ANALYTICS -------------------- */
+export async function generateAlertAnalytics(): Promise<void> {
+  const cacheKey = "analytics:alerts";
+
+  // Check if cached
+  const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+  if (cached) return; // already cached, nothing to do
+
+  // Aggregate alert trends from DB
+  const alertTrends = await Alert.aggregate([
+    { $group: { _id: "$type", total: { $sum: 1 } } },
+  ]);
+
+  // Cache for 10 minutes
+  await cacheHelpers.setAnalyticsData(cacheKey, alertTrends, 600);
+
+  console.log("📊 Alert trends analytics saved:", alertTrends);
+}
+

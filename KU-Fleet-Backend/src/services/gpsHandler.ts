@@ -1,13 +1,11 @@
 // src/services/gpsHandler.ts
 import Bus from "../models/Bus.model";
-import TripLog, { ITripLog } from "../models/TripLog.model";
+import TripLog from "../models/TripLog.model";
 import Alert from "../models/Alert.model";
-import Station, { IStation } from "../models/Station.model";
 import { IRoute } from "../interfaces/Route";
 import { tripQueue } from "../workers/queue";
 import { redisClient, cacheHelpers } from "../config/redis";
 import { getBusIdForIMEI } from "../utils/imeiCache";
-import { haversineMeters } from "../utils/geo";
 import { getSocketIO, ROOMS, EVENTS } from "../utils/socketHelper";
 import { bufferCoordinate, forceFlushBus } from "./gpsBuffer";
 
@@ -18,18 +16,13 @@ const ALERT_DEDUPE_SECONDS = Number(process.env.ALERT_DEDUPE_SECONDS ?? 120);
 const INACTIVITY_END_MIN = Number(process.env.INACTIVITY_MINUTES ?? 30);
 const SPEED_LIMIT_KMH = Number(process.env.SPEED_LIMIT_KMH ?? 80);
 
-// In-memory throttling
-const lastRedisWriteAt: Map<string, number> = new Map();
-const lastMovementAt: Map<string, number> = new Map();
-const lastLocationCache: Map<string, BusCoordinates> = new Map();
+// In-memory helpers
+const lastRedisWriteAt = new Map<string, number>();
+const lastMovementAt = new Map<string, number>();
+const lastLocationCache = new Map<string, BusCoordinates>();
 
 interface TerminalInfo {
-  status?: boolean;
-  ignition?: boolean;
-  charging?: boolean;
   alarmType?: string;
-  gpsTracking?: boolean;
-  relayState?: boolean;
 }
 
 export interface GPSData {
@@ -41,16 +34,11 @@ export interface GPSData {
 
 export interface ParsedMessage {
   imei: string | number;
-  event?: { number: number; string: string };
   terminalInfo?: TerminalInfo;
-  voltageLevel?: string;
-  gsmSigStrength?: string;
-  parseTime?: number;
-  expectsResponse?: boolean;
   gps?: GPSData;
-  lat?: number; // legacy
-  lon?: number; // legacy
-  speed?: number; // legacy
+  lat?: number;
+  lon?: number;
+  speed?: number;
   fixTime?: string | Date;
 }
 
@@ -61,9 +49,24 @@ export interface BusCoordinates {
   timestamp: Date;
 }
 
-// Type guard to detect valid GPS coordinates
-function hasValidCoords(msg: ParsedMessage): msg is ParsedMessage & { gps: GPSData } {
-  return !!((msg.gps && msg.gps.lat != null && msg.gps.lng != null) || (msg.lat != null && msg.lon != null));
+function hasValidCoords(msg: ParsedMessage): boolean {
+  return Boolean(
+    (msg.gps?.lat != null && msg.gps?.lng != null) ||
+    (msg.lat != null && msg.lon != null)
+  );
+}
+
+/**
+ * Atomic Redis NX + EX using MULTI
+ */
+async function acquireLock(key: string, ttlSeconds: number): Promise<boolean> {
+  const res = await redisClient
+    .multi()
+    .setnx(key, "1")
+    .expire(key, ttlSeconds)
+    .exec();
+
+  return res?.[0]?.[1] === 1;
 }
 
 export async function handleParsedMessage(msg: ParsedMessage): Promise<void> {
@@ -71,211 +74,150 @@ export async function handleParsedMessage(msg: ParsedMessage): Promise<void> {
   const busId = await getBusIdForIMEI(imei);
   const io = getSocketIO();
 
-  // --- Extract coordinates ---
   let coords: BusCoordinates | null = null;
+
   if (hasValidCoords(msg)) {
     coords = {
       lat: msg.gps?.lat ?? msg.lat!,
       lng: msg.gps?.lng ?? msg.lon!,
       speed: msg.gps?.speed ?? msg.speed ?? 0,
-      timestamp: msg.gps?.timestamp ? new Date(msg.gps.timestamp) : msg.fixTime ? new Date(msg.fixTime) : new Date(),
+      timestamp: msg.gps?.timestamp
+        ? new Date(msg.gps.timestamp)
+        : msg.fixTime
+        ? new Date(msg.fixTime)
+        : new Date(),
     };
   }
 
-  // --- Prepare socket payloads ---
-  const adminPayload = {
-    imei,
-    busId: busId ?? null,
-    event: msg.event ?? null,
-    terminalInfo: msg.terminalInfo ?? null,
-    voltageLevel: msg.voltageLevel ?? null,
-    gsmSigStrength: msg.gsmSigStrength ?? null,
-    parseTime: msg.parseTime ?? Date.now(),
-    gps: coords,
-  };
-
-  const studentPayload = coords
-    ? { imei, busId: busId ?? null, lat: coords.lat, lng: coords.lng, speed: coords.speed, timestamp: coords.timestamp }
-    : { imei, busId: busId ?? null };
-
+  // ───────── SOCKET EMITS ─────────
   if (io) {
-    io.to(ROOMS.ADMINS).emit(EVENTS.GPS_DATA, adminPayload);
-    io.to(ROOMS.STUDENTS).emit(EVENTS.GPS_DATA, studentPayload);
-    if (busId) io.to(ROOMS.bus(busId)).emit(EVENTS.GPS_DATA, adminPayload);
-    io.to(ROOMS.imei(imei)).emit(EVENTS.GPS_DATA, adminPayload);
+    io.to(ROOMS.ADMINS).emit(EVENTS.GPS_DATA, { imei, busId, gps: coords });
+    io.to(ROOMS.STUDENTS).emit(
+      EVENTS.GPS_DATA,
+      coords ? { busId, ...coords } : { busId }
+    );
+    if (busId) io.to(ROOMS.bus(busId)).emit(EVENTS.GPS_DATA, coords);
   }
 
-  if (!coords) return;
+  if (!coords || !busId) return;
 
-  // --- Redis throttled write ---
+  // ───────── REDIS LOCATION CACHE ─────────
   try {
     const now = Date.now();
-    const last = lastRedisWriteAt.get(imei) || 0;
+    const lastWrite = lastRedisWriteAt.get(imei) ?? 0;
 
-    if (now - last >= REDIS_LOCATION_THROTTLE_SEC * 1000) {
-      if (busId) {
-        const lastCached = lastLocationCache.get(busId);
-        const changed =
-          !lastCached ||
-          Math.abs(lastCached.lat - coords.lat) > 0.0001 ||
-          Math.abs(lastCached.lng - coords.lng) > 0.0001 ||
-          Math.abs(lastCached.speed - coords.speed) > 5;
+    if (now - lastWrite >= REDIS_LOCATION_THROTTLE_SEC * 1000) {
+      const last = lastLocationCache.get(busId);
 
-        if (changed) {
-          await cacheHelpers.setBusLocation(busId, coords, 180);
-          lastLocationCache.set(busId, { ...coords });
-          lastRedisWriteAt.set(imei, now);
-        }
-      } else {
-        await redisClient.setex(`bus:loc:imei:${imei}`, 180, JSON.stringify(coords));
+      const changed =
+        !last ||
+        Math.abs(last.lat - coords.lat) > 0.0001 ||
+        Math.abs(last.lng - coords.lng) > 0.0001 ||
+        Math.abs(last.speed - coords.speed) > 5;
+
+      if (changed) {
+        await cacheHelpers.setBusLocation(busId, coords, 180);
+        lastLocationCache.set(busId, coords);
         lastRedisWriteAt.set(imei, now);
       }
     }
-  } catch (err) {
-    console.warn("⚠️ Redis write failed:", err);
+  } catch {
+    // silent cache failure
   }
 
-  // --- Overspeed detection ---
-  if (coords.speed > SPEED_LIMIT_KMH && busId) {
-    const dedupeKey = `alert:dedupe:${imei}:overspeed`;
-    try {
-      const res = await redisClient.set(dedupeKey, "1", "EX", ALERT_DEDUPE_SECONDS, "NX");
-      if (res) {
-        const alert = await Alert.create({
-          bus: busId,
-          type: "overspeed",
-          message: `Bus ${busId} exceeded speed limit: ${coords.speed} km/h`,
-          priority: "high",
-          timestamp: new Date(),
-        });
-        if (io) {
-          io.to(ROOMS.ADMINS).emit(EVENTS.OVERSPEED_ALERT, { imei, busId, speed: coords.speed, alertId: alert._id, timestamp: new Date() });
-          io.to(ROOMS.ADMINS).emit(EVENTS.ALERT_CREATED, { alert: { _id: alert._id, bus: busId, type: "overspeed", message: alert.message, priority: "high", timestamp: alert.timestamp } });
-        }
-      }
-    } catch (err) {
-      console.warn("⚠️ Overspeed alert dedupe check failed:", err);
+  // ───────── OVERSPEED ALERT ─────────
+  if (coords.speed > SPEED_LIMIT_KMH) {
+    const key = `alert:overspeed:${imei}`;
+    const ok = await acquireLock(key, ALERT_DEDUPE_SECONDS);
+
+    if (ok) {
+      await Alert.create({
+        bus: busId,
+        type: "overspeed",
+        message: `Overspeed ${coords.speed} km/h`,
+        priority: "high",
+        timestamp: new Date(),
+      });
     }
   }
 
-  // --- Trip handling ---
+  // ───────── TRIP LOGIC ─────────
   try {
-    if (!busId) return;
+    const activeTrip = await TripLog.findOne({
+      bus: busId,
+      endTime: null,
+    });
 
-    const activeTrip = await TripLog.findOne({ bus: busId, endTime: null }).lean<ITripLog | null>();
+    const bus = await Bus.findById(busId)
+      .populate<{ route: IRoute }>("route")
+      .lean();
 
-    // Type-safe populate
-    const busDoc = await Bus.findById(busId).populate<{ route: IRoute }>("route").lean<{ route: IRoute | null }>();
-    const route = busDoc?.route ?? null;
+    const route = bus?.route ?? null;
 
-    // --- Start Trip ---
-    if (!activeTrip) {
-      let shouldStart = coords.speed >= MIN_SPEED_KMH;
+    // START TRIP
+    if (!activeTrip && coords.speed >= MIN_SPEED_KMH) {
+      const trip = await TripLog.create({
+        bus: busId,
+        driver: bus?.driver,
+        route: route?._id,
+        startTime: coords.timestamp,
+        coordinates: [coords],
+        status: "in_progress",
+      });
 
-      if (route?.stations?.length) {
-        const firstStationId = route.stations[0];
-        const station = await Station.findById(firstStationId).lean<IStation | null>();
-        if (station?.position?.coordinates) {
-          const [stLng, stLat] = station.position.coordinates;
-          const dist = haversineMeters(coords.lat, coords.lng, stLat, stLng);
-          if (dist <= STATION_PROXIMITY_METERS) shouldStart = false;
-        }
-      }
+      bufferCoordinate(busId, coords);
+      lastMovementAt.set(imei, Date.now());
 
-      if (shouldStart) {
-        const newTrip = await TripLog.create({
-          bus: busId,
-          route: route?._id ?? undefined,
-          startTime: coords.timestamp,
-          coordinates: [coords],
-          status: "in_progress",
-        });
-
-        bufferCoordinate(busId, coords);
-
-        if (io) {
-          io.to(ROOMS.ADMINS).emit(EVENTS.TRIP_STARTED, {
-            tripId: String(newTrip._id),
-            busId,
-            imei,
-            routeId: route?._id ? String(route._id) : null,
-            startTime: coords.timestamp,
-            startLocation: { lat: coords.lat, lng: coords.lng },
-          });
-          io.to(ROOMS.bus(busId)).emit(EVENTS.TRIP_STARTED, { tripId: String(newTrip._id), busId, startTime: coords.timestamp });
-        }
-
-        lastMovementAt.set(imei, Date.now());
-        console.log("🟢 Trip started:", String(newTrip._id));
-      }
+      io?.to(ROOMS.ADMINS).emit(EVENTS.TRIP_STARTED, {
+        tripId: String(trip._id),
+        busId,
+      });
 
       return;
     }
 
-    // --- Active Trip Segment ---
+    if (!activeTrip) return;
+
     bufferCoordinate(busId, coords);
 
-    // --- End Trip ---
-    if (route?.stations?.length) {
-      const firstStationId = route.stations[0];
-      const station = await Station.findById(firstStationId).lean<IStation | null>();
-      if (station?.position?.coordinates) {
-        const [stLng, stLat] = station.position.coordinates;
-        const dist = haversineMeters(coords.lat, coords.lng, stLat, stLng);
-        if (dist <= STATION_PROXIMITY_METERS && coords.speed < 3) {
-          await forceFlushBus(busId);
-          await tripQueue.add("endTrip", { busId, endCoords: coords }, { removeOnComplete: true, attempts: 3 });
-          if (io) io.to(ROOMS.ADMINS).emit(EVENTS.TRIP_ENDED, { busId, imei, endLocation: { lat: coords.lat, lng: coords.lng }, reason: "station_proximity", timestamp: new Date() });
-          console.log("🔴 Trip end queued (station) for bus:", busId);
-        }
-      }
-    } else {
-      const last = lastMovementAt.get(imei) || 0;
-      if (coords.speed >= MIN_SPEED_KMH) lastMovementAt.set(imei, Date.now());
-      else if (Date.now() - last >= INACTIVITY_END_MIN * 60 * 1000) {
-        await forceFlushBus(busId);
-        await tripQueue.add("endTrip", { busId, endCoords: coords }, { removeOnComplete: true, attempts: 3 });
-        if (io) io.to(ROOMS.ADMINS).emit(EVENTS.TRIP_ENDED, { busId, imei, endLocation: { lat: coords.lat, lng: coords.lng }, reason: "inactivity", timestamp: new Date() });
-        console.log("🔴 Trip end queued (inactivity) for bus:", busId);
-      }
+    // MOVEMENT TRACKING
+    if (coords.speed >= MIN_SPEED_KMH) {
+      lastMovementAt.set(imei, Date.now());
+      return;
+    }
+
+    // END TRIP BY INACTIVITY
+    const lastMove = lastMovementAt.get(imei) ?? Date.now();
+    const inactiveMs = Date.now() - lastMove;
+
+    if (inactiveMs >= INACTIVITY_END_MIN * 60 * 1000) {
+      const lockKey = `trip:end:${busId}`;
+      const acquired = await acquireLock(lockKey, ALERT_DEDUPE_SECONDS);
+      if (!acquired) return;
+
+      await forceFlushBus(busId);
+      await tripQueue.add("endTrip", {
+        busId,
+        endCoords: coords,
+      });
     }
   } catch (err) {
-    console.error("❌ Trip handling error:", err);
+    console.error("Trip handling error:", err);
   }
 
-  // --- Terminal / Status Alerts ---
-  if (msg.terminalInfo && msg.event?.string === "status") {
-    const alarmType = msg.terminalInfo.alarmType ?? "unknown";
-    if (alarmType !== "normal") {
-      const dedupeKey = `alert:dedupe:${imei}:${alarmType}`;
-      try {
-        const res = await redisClient.set(dedupeKey, "1", "EX", ALERT_DEDUPE_SECONDS, "NX");
-        if (res) {
-          const alert = await Alert.create({
-            bus: busId ?? undefined,
-            type: alarmType === "panic" ? "panic" : "system",
-            message: `Alarm ${alarmType} from IMEI ${imei}`,
-            priority: "high",
-            timestamp: new Date(),
-          });
-          if (io) {
-            io.to(ROOMS.ADMINS).emit(EVENTS.ALERT_CREATED, {
-              alert: {
-                _id: alert._id,
-                bus: busId,
-                type: alarmType === "panic" ? "panic" : "system",
-                message: alert.message,
-                priority: "high",
-                timestamp: alert.timestamp,
-              },
-              imei,
-              alarmType,
-            });
-          }
-        }
-      } catch (err) {
-        console.error("❌ Alert creation error:", err);
-      }
+  // ───────── TERMINAL ALERTS ─────────
+  if (msg.terminalInfo?.alarmType && msg.terminalInfo.alarmType !== "normal") {
+    const key = `alert:terminal:${imei}:${msg.terminalInfo.alarmType}`;
+    const ok = await acquireLock(key, ALERT_DEDUPE_SECONDS);
+
+    if (ok) {
+      await Alert.create({
+        bus: busId,
+        type: "system",
+        message: `Alarm ${msg.terminalInfo.alarmType}`,
+        priority: "high",
+        timestamp: new Date(),
+      });
     }
   }
 }

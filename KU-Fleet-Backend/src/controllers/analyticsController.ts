@@ -1,15 +1,21 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import Bus from "../models/Bus.model";
 import TripLog from "../models/TripLog.model";
 import Alert from "../models/Alert.model";
 import Feedback from "../models/Feedback.model";
+import { cacheHelpers } from "../config/redis";
 
 /** -----------------------------
  *  GET /api/analytics/overview
- *  Summary of all key stats
+ *  Summary of all key stats (cached)
  *  ----------------------------- */
 export const getFleetOverview = async (req: Request, res: Response) => {
   try {
+    const cacheKey = "analytics:fleetOverview";
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, ...cached });
+
     const [totalBuses, activeBuses, totalDrivers, totalTrips, totalAlerts] = await Promise.all([
       Bus.countDocuments(),
       Bus.countDocuments({ busStatus: "active" }),
@@ -18,9 +24,7 @@ export const getFleetOverview = async (req: Request, res: Response) => {
       Alert.countDocuments(),
     ]);
 
-    const avgRatingAgg = await Feedback.aggregate([
-      { $group: { _id: null, avgRating: { $avg: "$rating" } } },
-    ]);
+    const avgRatingAgg = await Feedback.aggregate([{ $group: { _id: null, avgRating: { $avg: "$rating" } } }]);
 
     const overview = {
       totalBuses,
@@ -31,6 +35,9 @@ export const getFleetOverview = async (req: Request, res: Response) => {
       avgRating: avgRatingAgg[0]?.avgRating || 0,
     };
 
+    // Cache for 10 minutes
+    await cacheHelpers.setAnalyticsData(cacheKey, overview, 600);
+
     res.status(200).json({ success: true, overview });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch fleet overview", error });
@@ -39,15 +46,18 @@ export const getFleetOverview = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/bus/:id
- *  Bus-specific performance
+ *  Bus-specific performance (cached)
  *  ----------------------------- */
 export const getBusAnalytics = async (req: Request, res: Response) => {
   try {
     const busId = req.params.id;
+    const cacheKey = `analytics:bus:${busId}`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, ...cached });
 
     const [tripStats, alerts, feedbacks] = await Promise.all([
       TripLog.aggregate([
-        { $match: { bus: busId } },
+        { $match: { bus: new mongoose.Types.ObjectId(busId) } },
         {
           $group: {
             _id: "$bus",
@@ -61,13 +71,17 @@ export const getBusAnalytics = async (req: Request, res: Response) => {
       Feedback.find({ bus: busId }).sort({ createdAt: -1 }).limit(10),
     ]);
 
-    res.status(200).json({
-      success: true,
+    const result = {
       busId,
       stats: tripStats[0] || {},
       alerts,
       feedbacks,
-    });
+    };
+
+    // Cache for 5 minutes
+    await cacheHelpers.setAnalyticsData(cacheKey, result, 300);
+
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch bus analytics", error });
   }
@@ -75,12 +89,16 @@ export const getBusAnalytics = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/driver/:id
- *  Driver performance analytics
+ *  Driver performance analytics (cached)
  *  ----------------------------- */
 export const getDriverAnalytics = async (req: Request, res: Response) => {
   try {
     const driverId = req.params.id;
-    const buses = await Bus.find({ "driver._id": driverId });
+    const cacheKey = `analytics:driver:${driverId}`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, ...cached });
+
+    const buses = await Bus.find({ "driver._id": new mongoose.Types.ObjectId(driverId) });
     const busIds = buses.map((b) => b._id);
 
     const trips = await TripLog.aggregate([
@@ -97,12 +115,16 @@ export const getDriverAnalytics = async (req: Request, res: Response) => {
 
     const alerts = await Alert.countDocuments({ bus: { $in: busIds } });
 
-    res.status(200).json({
-      success: true,
+    const result = {
       driverId,
       trips: trips[0] || {},
       totalAlerts: alerts,
-    });
+    };
+
+    // Cache 5 minutes
+    await cacheHelpers.setAnalyticsData(cacheKey, result, 300);
+
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch driver analytics", error });
   }
@@ -110,10 +132,14 @@ export const getDriverAnalytics = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/routes
- *  Route-level statistics
+ *  Route-level statistics (cached)
  *  ----------------------------- */
 export const getRouteAnalytics = async (req: Request, res: Response) => {
   try {
+    const cacheKey = `analytics:routes`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, routeStats: cached });
+
     const routeStats = await TripLog.aggregate([
       {
         $lookup: {
@@ -134,6 +160,9 @@ export const getRouteAnalytics = async (req: Request, res: Response) => {
       },
     ]);
 
+    // Cache 10 minutes
+    await cacheHelpers.setAnalyticsData(cacheKey, routeStats, 600);
+
     res.status(200).json({ success: true, routeStats });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch route analytics", error });
@@ -142,19 +171,19 @@ export const getRouteAnalytics = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/alerts
- *  Alert trend analysis
+ *  Alert trend analysis (cached)
  *  ----------------------------- */
 export const getAlertTrends = async (req: Request, res: Response) => {
   try {
+    const cacheKey = `analytics:alerts`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, alertTrends: cached });
+
     const alertTrends = await Alert.aggregate([
-      {
-        $group: {
-          _id: { type: "$type" },
-          total: { $sum: 1 },
-        },
-      },
+      { $group: { _id: { type: "$type" }, total: { $sum: 1 } } },
     ]);
 
+    await cacheHelpers.setAnalyticsData(cacheKey, alertTrends, 600);
     res.status(200).json({ success: true, alertTrends });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch alert analytics", error });
@@ -163,26 +192,21 @@ export const getAlertTrends = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/feedback
- *  Rating & complaint analytics
+ *  Rating & complaint analytics (cached)
  *  ----------------------------- */
 export const getFeedbackAnalytics = async (req: Request, res: Response) => {
   try {
-    const ratings = await Feedback.aggregate([
-      {
-        $group: {
-          _id: "$rating",
-          count: { $sum: 1 },
-        },
-      },
-    ]);
+    const cacheKey = `analytics:feedback`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, ...cached });
 
+    const ratings = await Feedback.aggregate([{ $group: { _id: "$rating", count: { $sum: 1 } } }]);
     const unresolved = await Feedback.countDocuments({ resolved: false });
 
-    res.status(200).json({
-      success: true,
-      ratings,
-      unresolvedComplaints: unresolved,
-    });
+    const result = { ratings, unresolvedComplaints: unresolved };
+    await cacheHelpers.setAnalyticsData(cacheKey, result, 600);
+
+    res.status(200).json({ success: true, ...result });
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch feedback analytics", error });
   }
@@ -190,11 +214,15 @@ export const getFeedbackAnalytics = async (req: Request, res: Response) => {
 
 /** -----------------------------
  *  GET /api/analytics/timeseries?days=7
- *  Fleet usage trends over time
+ *  Fleet usage trends over time (cached)
  *  ----------------------------- */
 export const getFleetTimeseries = async (req: Request, res: Response) => {
   try {
     const days = parseInt(req.query.days as string) || 7;
+    const cacheKey = `analytics:timeseries:${days}`;
+    const cached = await cacheHelpers.getAnalyticsData(cacheKey);
+    if (cached) return res.status(200).json({ success: true, days, trips: cached });
+
     const since = new Date();
     since.setDate(since.getDate() - days);
 
@@ -209,6 +237,8 @@ export const getFleetTimeseries = async (req: Request, res: Response) => {
       },
       { $sort: { _id: 1 } },
     ]);
+
+    await cacheHelpers.setAnalyticsData(cacheKey, trips, 600);
 
     res.status(200).json({ success: true, days, trips });
   } catch (error) {

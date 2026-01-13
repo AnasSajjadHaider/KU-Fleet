@@ -1,85 +1,90 @@
-// gpsBuffer.ts
+// src/services/gpsBuffer.ts
 import EventEmitter from "events";
-import { cacheHelpers } from "../config/redis";   // <-- using your helpers
 import { redisClient } from "../config/redis";
+import { BusCoordinates } from "./gpsHandler";
 
 /**
  * GPSBuffer
- * Stores & batches GPS packets for each bus before pushing it to Redis.
+ * Batches GPS points in memory before pushing to Redis.
  */
 
 class GPSBuffer extends EventEmitter {
-  private buffer: Map<string, any[]>;
+  private buffer: Map<string, BusCoordinates[]>;
   private flushInterval: NodeJS.Timeout;
 
   constructor() {
     super();
     this.buffer = new Map();
 
-    // Flush every 10 seconds (adjust as needed)
-    this.flushInterval = setInterval(() => this.flushAll(), 10_000);
+    // Flush every 10 seconds
+    this.flushInterval = setInterval(() => {
+      void this.flushAll();
+    }, 10_000);
 
     console.log("📍 GPS Buffer initialized");
   }
 
   /**
-   * Add a new GPS packet for a bus
+   * Add a GPS coordinate for a bus
    */
-  add(busId: string, gpsData: any) {
+  add(busId: string, coords: BusCoordinates): void {
     if (!this.buffer.has(busId)) {
       this.buffer.set(busId, []);
     }
 
-    this.buffer.get(busId)!.push({
-      ...gpsData,
-      timestamp: Date.now(),
-    });
+    this.buffer.get(busId)!.push(coords);
 
-    // Update the latest bus location cache immediately
-    cacheHelpers.setBusLocation(busId, gpsData).catch(console.error);
-
-    // Emit an event for UI updates or analytics
-    this.emit("location_update", busId, gpsData);
+    // Optional hook for analytics / live listeners
+    this.emit("location_update", busId, coords);
   }
 
   /**
-   * Flush local buffer into Redis as a batch list
+   * Flush buffered coordinates for a bus into Redis
    */
-  async flush(busId: string) {
+  async flush(busId: string): Promise<void> {
     const points = this.buffer.get(busId);
     if (!points || points.length === 0) return;
 
+    const redisKey = `bus:gps_history:${busId}`;
+
     try {
-      const redisKey = `bus:gps_history:${busId}`;
+      await redisClient.multi()
+        .rpush(
+          redisKey,
+          ...points.map(p =>
+            JSON.stringify({
+              lat: p.lat,
+              lng: p.lng,
+              speed: p.speed,
+              timestamp: p.timestamp.toISOString(),
+            })
+          )
+        )
+        .ltrim(redisKey, -500, -1)
+        .expire(redisKey, 60 * 60 * 24) // keep 24h history
+        .exec();
 
-      // Push all points to Redis list
-      await redisClient.rpush(redisKey, ...points.map(p => JSON.stringify(p)));
-
-      // Keep list from growing too large
-      await redisClient.ltrim(redisKey, -500, -1); // keep last 500 points
-
-      // Clear in-memory buffer
       this.buffer.set(busId, []);
-
-      console.log(`📤 Flushed ${points.length} GPS points for bus ${busId}`);
     } catch (err) {
       console.error("❌ GPS Buffer flush error:", err);
     }
   }
 
   /**
-   * Flush all buses
+   * Flush all buses (parallel, non-blocking)
    */
-  async flushAll() {
-    for (const busId of this.buffer.keys()) {
-      await this.flush(busId);
-    }
+  async flushAll(): Promise<void> {
+    await Promise.all(
+      Array.from(this.buffer.keys()).map(busId =>
+        this.flush(busId)
+      )
+    );
   }
 
   /**
-   * Clean up before shutdown
+   * Graceful shutdown
    */
-  async shutdown() {
+  async shutdown(): Promise<void> {
     clearInterval(this.flushInterval);
     await this.flushAll();
     console.log("🛑 GPS Buffer shutdown completed");
@@ -87,11 +92,11 @@ class GPSBuffer extends EventEmitter {
 }
 
 export const gpsBuffer = new GPSBuffer();
-export const bufferCoordinate = (busId: string, coords: any) => {
+
+export const bufferCoordinate = (busId: string, coords: BusCoordinates): void => {
   gpsBuffer.add(busId, coords);
 };
 
-export const forceFlushBus = async (busId: string) => {
+export const forceFlushBus = async (busId: string): Promise<void> => {
   await gpsBuffer.flush(busId);
 };
- 
