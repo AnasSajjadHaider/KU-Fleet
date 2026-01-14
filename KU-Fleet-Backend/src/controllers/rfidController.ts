@@ -12,82 +12,56 @@ export const handleRfidScan = async (req: Request, res: Response) => {
   try {
     const { rfidTag, busId } = req.body;
 
-    // 1️⃣ Validate input
     if (!rfidTag || !busId) {
       return res.status(400).json({ message: "rfidTag and busId are required" });
     }
 
-    // 2️⃣ Normalize RFID UID: remove spaces, convert to uppercase
     const normalizedUID = rfidTag.replace(/\s+/g, "").toUpperCase();
 
-    // 3️⃣ Validate bus
     const bus = await Bus.findById(busId);
-    if (!bus) {
-      return res.status(404).json({ message: "Bus not found" });
-    }
+    if (!bus) return res.status(404).json({ message: "Bus not found" });
 
-    // 4️⃣ Find active student by RFID (no email/password required)
     const student = await User.findOne({
       rfidCardUID: normalizedUID,
       role: "student",
       status: "active",
     });
+    if (!student) return res.status(404).json({ message: "Invalid RFID card" });
 
-    if (!student) {
-      return res.status(404).json({ message: "Invalid RFID card" });
-    }
+    // ✅ Simplified: just flip last event on this bus
+    const eventType = await determineRfidEvent(String(student._id), String(bus._id));
 
-    // 5️⃣ Determine BOARD / EXIT event
-    const eventType = await determineRfidEvent(
-      String(student._id),
-      String(bus._id)
-    );
-
-    // 6️⃣ Find active trip for the bus (optional but recommended)
-    const activeTrip = await TripLog.findOne({
-      bus: bus._id,
-      status: "active",
-    });
-
-    // 7️⃣ Save RFID log
+    // Save log
     const log = await RFIDLog.create({
       rfidTag: normalizedUID,
       student: student._id,
       bus: bus._id,
       eventType,
-      trip: activeTrip?._id,
     });
+
+    // Update passenger count if active trip exists
+    const activeTrip = await TripLog.findOne({ bus: bus._id, status: "active" });
     if (activeTrip) {
       const delta = eventType === "BOARD" ? 1 : -1;
-    
-      await TripLog.findByIdAndUpdate(
-        activeTrip._id,
-        { $inc: { passengerCount: delta } },
-        { new: true }
-      );
+      await TripLog.findByIdAndUpdate(activeTrip._id, { $inc: { passengerCount: delta } });
     }
-    
 
-    // 8️⃣ Emit socket event for real-time updates
+    // Emit real-time event
     const io = req.app.get("io");
     io?.emit("rfid:event", {
       studentId: student._id,
       studentName: student.name,
       busId: bus._id,
       eventType,
-      timestamp: log.createdAt ?? log.timestamp
+      timestamp: log.createdAt,
     });
 
-    // 9️⃣ Return success
     return res.status(200).json({
       message: "RFID processed successfully",
       eventType,
-      student: {
-        id: student._id,
-        name: student.name,
-        rfidCardUID: student.rfidCardUID,
-      },
+      student: { id: student._id, name: student.name, rfidCardUID: student.rfidCardUID },
     });
+
   } catch (error: any) {
     console.error("RFID ERROR:", error);
     return res.status(500).json({ message: "RFID scan failed", error: error.message });
