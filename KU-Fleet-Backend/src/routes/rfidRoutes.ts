@@ -6,7 +6,7 @@ const router = Router();
 
 router.post("/scan", handleRfidScan);
 // 2️⃣ Get all RFID logs (admin only)
-router.get("/logs", protect, adminOnly, getAllRfidLogs);
+router.get("/logs", protect, getAllRfidLogs);
 
 // 3️⃣ Get logs for a specific student (by studentId or rfidCardUID)
 router.get("/student", protect, getStudentRfidLogs);
