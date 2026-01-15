@@ -1,6 +1,6 @@
 # KU-Fleet
 
-A comprehensive fleet management system with real-time GPS tracking, passenger RFID monitoring, route management, and analytics for bus fleet operations.
+A comprehensive fleet management system with real-time GPS tracking, passenger RFID monitoring, and route management for bus fleet operations.
 
 ## 🚀 Features
 
@@ -8,12 +8,17 @@ A comprehensive fleet management system with real-time GPS tracking, passenger R
 - **RFID Passenger Tracking**: Monitor passenger boarding and alighting via RFID cards
 - **Route Management**: Define and manage bus routes with stations
 - **Driver Management**: Assign and manage drivers for buses
-- **Analytics Dashboard**: Comprehensive analytics on trips, routes, and bus performance
-- **Alert System**: Real-time alerts for speed violations, route deviations, and system events
 - **Socket.IO Integration**: Real-time updates via WebSocket connections
 - **Student Feedback**: Collect and manage student feedback on bus services
 - **Media Management**: Upload and manage images via Cloudinary integration
 - **TCP Server**: Dedicated TCP server for GPS tracker device communication
+
+## 🔮 Planned Features
+
+The following features are planned for future implementation:
+
+- **Analytics Dashboard**: Comprehensive analytics on trips, routes, and bus performance
+- **Alert System**: Real-time alerts for speed violations, route deviations, and system events
 
 ## 📋 Table of Contents
 
@@ -23,7 +28,6 @@ A comprehensive fleet management system with real-time GPS tracking, passenger R
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Running the Application](#running-the-application)
-- [Docker Deployment](#docker-deployment)
 - [API Documentation](#api-documentation)
 - [Environment Variables](#environment-variables)
 - [Development](#development)
@@ -57,7 +61,6 @@ A comprehensive fleet management system with real-time GPS tracking, passenger R
 - **Forms**: React Hook Form + Zod
 - **Maps**: Google Maps API (React Google Maps)
 - **Routing**: React Router DOM
-- **Charts**: Recharts
 - **Real-time**: Socket.IO Client
 
 ## 📁 Project Structure
@@ -82,7 +85,6 @@ KU-Fleet/
 │   │   ├── sockets/           # Socket.IO handlers
 │   │   ├── utils/             # Utility functions
 │   │   └── interfaces/        # TypeScript interfaces
-│   ├── docker-compose.yml     # Docker Compose configuration
 │   ├── package.json
 │   └── tsconfig.json
 │
@@ -113,7 +115,6 @@ Before you begin, ensure you have the following installed:
 - **MongoDB** (local or MongoDB Atlas account)
 - **Redis** (local or Upstash account)
 - **Git**
-- **Docker** and **Docker Compose** (optional, for containerized deployment)
 
 ## 📦 Installation
 
@@ -173,14 +174,11 @@ CLOUDINARY_API_SECRET=your-cloudinary-api-secret
 STATION_PROXIMITY_METERS=60
 MIN_SPEED_KMH=5
 REDIS_LOCATION_THROTTLE_SEC=10
-ALERT_DEDUPE_SECONDS=120
 INACTIVITY_MINUTES=30
-SPEED_LIMIT_KMH=80
 BUS_CACHE_TTL_SEC=180
 
 # Data Retention (Optional - defaults provided)
 TRIP_RETENTION_DAYS=7
-ALERT_RETENTION_DAYS=30
 
 # MTX Camera Configuration (Optional)
 MTX_STREAMING_NODE=http://your-mtx-server:8083
@@ -243,49 +241,6 @@ npm run preview
 
 The production build will be in the `dist` folder.
 
-## 🐳 Docker Deployment
-
-### Using Docker Compose
-
-1. **Navigate to Backend Directory**
-
-```bash
-cd KU-Fleet-Backend
-```
-
-2. **Create `.env` file** (see Configuration section above)
-
-3. **Build and Start Services**
-
-```bash
-docker-compose up -d
-```
-
-This will start:
-- Backend API server
-- MongoDB (if using local instance)
-- Redis (if using local instance)
-
-4. **View Logs**
-
-```bash
-docker-compose logs -f
-```
-
-5. **Stop Services**
-
-```bash
-docker-compose down
-```
-
-### Docker Compose Services
-
-- **Backend**: Exposed on ports 3000 (HTTP) and 5050 (TCP)
-- **MongoDB**: Exposed on port 27017
-- **Redis**: Exposed on port 6379
-
-**Note**: For production, use managed services (MongoDB Atlas, Upstash Redis) instead of containerized databases.
-
 ## 📡 API Documentation
 
 ### Base URL
@@ -342,17 +297,6 @@ Authorization: Bearer <token>
 - `GET /api/tripLogs/:id` - Get trip details
 - `GET /api/tripLogs/bus/:busId` - Get trips for a bus
 
-#### Analytics
-- `GET /api/analytics/daily` - Daily analytics
-- `GET /api/analytics/bus/:busId` - Bus-specific analytics
-- `GET /api/analytics/route/:routeId` - Route-specific analytics
-
-#### Alerts
-- `GET /api/alerts` - Get all alerts
-- `GET /api/alerts/stats` - Get alert statistics
-- `GET /api/alerts/bus/:busId` - Get alerts for a bus
-- `PUT /api/alerts/:id` - Update alert (resolve, etc.)
-
 #### RFID
 - `GET /api/rfid/logs` - Get RFID logs
 - `POST /api/rfid/logs` - Create RFID log entry
@@ -377,7 +321,6 @@ For complete API documentation, refer to `KU-Fleet-Backend/API_ENDPOINTS.md` or 
 - `gpsUpdate` - GPS location update for a bus
 - `tripStarted` - Trip started event
 - `tripEnded` - Trip ended event
-- `alert` - New alert created
 - `rfidEvent` - RFID card scanned event
 
 ### Rooms
@@ -409,13 +352,10 @@ For complete API documentation, refer to `KU-Fleet-Backend/API_ENDPOINTS.md` or 
 | `CORS_ORIGIN` | `*` | CORS allowed origins |
 | `STATION_PROXIMITY_METERS` | `60` | Distance threshold for station detection |
 | `MIN_SPEED_KMH` | `5` | Minimum speed to consider bus moving |
-| `SPEED_LIMIT_KMH` | `80` | Speed limit for speed alerts |
 | `REDIS_LOCATION_THROTTLE_SEC` | `10` | Throttle interval for Redis location writes |
-| `ALERT_DEDUPE_SECONDS` | `120` | Alert deduplication window |
 | `INACTIVITY_MINUTES` | `30` | Minutes of inactivity before ending trip |
 | `BUS_CACHE_TTL_SEC` | `180` | Bus location cache TTL |
 | `TRIP_RETENTION_DAYS` | `7` | Days to retain trip logs |
-| `ALERT_RETENTION_DAYS` | `30` | Days to retain alerts |
 
 ### Frontend Variables
 
