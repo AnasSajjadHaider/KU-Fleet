@@ -433,13 +433,8 @@ npm run lint
    - Ensure backend is running
    - Check browser console for CORS or network errors
 
-## 📝 License
 
-[Specify your license here]
 
-## 👥 Contributing
-
-[Add contribution guidelines here]
 
 ## 📞 Support
 
