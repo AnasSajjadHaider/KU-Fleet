@@ -1,4 +1,5 @@
-# KU-Fleet
+ HEAD
+# KU-Fleethttps://aka.ms/vscode-workspace-trust
 
 A comprehensive fleet management system with real-time GPS tracking, passenger RFID monitoring, and route management for bus fleet operations.
 
@@ -440,6 +441,17 @@ npm run lint
 
 For issues, questions, or contributions, please open an issue on the repository.
 
----
+
 
 **KU-Fleet** - Comprehensive Fleet Management System
+
+# KU-Fleet Management System
+
+This repository contains the official backend code for the KU Fleet Management System, an IoT-based real-time transport tracking solution for the University of Karachi Transport Unit.
+
+**Maintained by:** Muhammad Anas Sajjad Haider
+
+**Frontend Deployment:** Vercel (controlled by the owner)
+
+**Backend Deployment:** AWS (controlled by the owner)
+ 65adce8a7fe20588a1ff5184cc8ee92fc767d262
